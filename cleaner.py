@@ -888,6 +888,8 @@ class WindowsCleaner:
             ("空文件夹", self.scan_empty_folders),
             ("软件卸载残留", self.scan_software_leftovers),
             ("无效快捷方式", self.scan_invalid_shortcuts),
+            ("大文件扫描", self.scan_large_files),
+            ("重复文件", self.scan_duplicate_files),
         ]
 
         total_modules = len(scan_modules)
