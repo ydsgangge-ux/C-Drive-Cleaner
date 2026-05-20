@@ -887,10 +887,7 @@ class WindowsCleaner:
             ("DNS 缓存", self.scan_dns_cache),
             ("空文件夹", self.scan_empty_folders),
             ("软件卸载残留", self.scan_software_leftovers),
-            ("大文件扫描", lambda: self.scan_large_files(100)),
-            ("重复文件", self.scan_duplicate_files),
             ("无效快捷方式", self.scan_invalid_shortcuts),
-            ("磁盘空间分析", self.scan_disk_analysis),
         ]
 
         total_modules = len(scan_modules)
