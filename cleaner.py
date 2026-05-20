@@ -826,10 +826,17 @@ class WindowsCleaner:
     # 清理执行
     # ============================================================
     def clean_items(self, items: List[CleanItem], callback=None) -> Tuple[int, int]:
-        """执行清理，返回 (成功数, 失败数)"""
+        """执行清理，返回 (成功数, 失败数)
+        
+        注意：以下分类的条目会被跳过（只读分析，不可删除）：
+        - 磁盘空间分析
+        """
         success = 0
         failed = 0
         total = len(items)
+
+        # 只读分类（不可删除）
+        readonly_categories = {"磁盘空间分析"}
 
         for i, item in enumerate(items):
             if self._stop_flag:
@@ -837,6 +844,11 @@ class WindowsCleaner:
 
             if callback:
                 callback(i + 1, total, f"清理: {os.path.basename(item.path)}")
+
+            # 跳过只读分类（磁盘空间分析等只显示不删除）
+            if item.category in readonly_categories:
+                failed += 1
+                continue
 
             try:
                 path = item.path
@@ -847,6 +859,20 @@ class WindowsCleaner:
                                    capture_output=True, timeout=10)
                     success += 1
                     continue
+
+                # 大文件扫描额外安全确认（只删除用户目录下的明确临时/缓存文件）
+                if item.category == "大文件扫描":
+                    # 只删除位于临时目录或缓存目录的大文件
+                    temp_dirs = [
+                        tempfile.gettempdir().lower(),
+                        os.path.join(self.user_profile, 'AppData', 'Local', 'Temp').lower(),
+                        os.path.join(self.user_profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'INetCache').lower(),
+                    ]
+                    path_lower = path.lower()
+                    is_safe = any(path_lower.startswith(td) for td in temp_dirs)
+                    if not is_safe:
+                        failed += 1
+                        continue
 
                 if os.path.isfile(path):
                     os.remove(path)
@@ -890,6 +916,7 @@ class WindowsCleaner:
             ("无效快捷方式", self.scan_invalid_shortcuts),
             ("大文件扫描", self.scan_large_files),
             ("重复文件", self.scan_duplicate_files),
+            ("磁盘空间分析", self.scan_disk_analysis),
         ]
 
         total_modules = len(scan_modules)

@@ -457,10 +457,15 @@ class CleanerGUI:
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
 
+        # 只读分类（可查看不可删除）
+        readonly_categories = {"磁盘空间分析"}
+
         row = 0
         for cat_name, category in self.categories.items():
             if not category.items:
                 continue
+
+            is_readonly = cat_name in readonly_categories
 
             # 分类卡片
             card = tk.Frame(self.scrollable_frame, bg=self.COLORS['white'],
@@ -468,7 +473,7 @@ class CleanerGUI:
             card.pack(fill=tk.X, padx=4, pady=3)
 
             # 复选框 + 分类名 + 大小
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(value=not is_readonly)
             if cat_name not in self.check_vars:
                 self.check_vars[cat_name] = {}
 
@@ -483,6 +488,17 @@ class CleanerGUI:
                 command=lambda cn=cat_name: self._on_category_toggle(cn)
             )
             cb.pack(side=tk.LEFT, padx=(8, 0), pady=6)
+
+            # 只读标签（仅查看，不可删除）
+            if is_readonly:
+                readonly_label = tk.Label(
+                    card,
+                    text="📊 仅查看",
+                    font=('Microsoft YaHei', 8),
+                    fg=self.COLORS['info'],
+                    bg=self.COLORS['white']
+                )
+                readonly_label.pack(side=tk.LEFT, padx=(4, 0), pady=6)
 
             # 大小标签
             size_label = tk.Label(
