@@ -1,6 +1,7 @@
 """
-C盘清理工具 - 图形界面
-基于 tkinter 的 Windows 系统垃圾清理 GUI
+C盘清理大师 - 图形界面
+基于 tkinter 的专业 Windows 系统垃圾清理 GUI
+功能对标：Dism++、CCleaner、火绒垃圾清理
 """
 
 import os
@@ -8,38 +9,47 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
-from typing import Dict, List
+from typing import Dict, List, Optional
+from datetime import datetime
 
-from cleaner import WindowsCleaner, CleanCategory, CleanItem, format_size, is_admin
+from cleaner import (
+    WindowsCleaner, CleanCategory, CleanItem,
+    format_size, is_admin, run_as_admin
+)
 
 
 class CleanerGUI:
-    """C盘清理工具图形界面"""
+    """C盘清理大师图形界面 - 专业版"""
 
-    # 主题颜色
+    # 主题颜色 - 现代清爽风格
     COLORS = {
-        'bg': '#f0f0f0',
+        'bg': '#f5f5f5',
         'primary': '#2196F3',
-        'primary_dark': '#1976D2',
+        'primary_dark': '#1565C0',
+        'primary_light': '#BBDEFB',
         'success': '#4CAF50',
         'warning': '#FF9800',
         'danger': '#f44336',
-        'text': '#333333',
-        'text_light': '#666666',
+        'info': '#00BCD4',
+        'text': '#212121',
+        'text_light': '#757575',
         'white': '#ffffff',
         'border': '#e0e0e0',
         'card_bg': '#ffffff',
         'progress_bg': '#e0e0e0',
+        'hover': '#e3f2fd',
+        'selected': '#c8e6c9',
+        'header_bg': '#1976D2',
     }
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("C盘清理工具 - Windows 系统垃圾清理")
-        self.root.geometry("900x680")
-        self.root.minsize(800, 600)
+        self.root.title("C盘清理大师 - 专业版")
+        self.root.geometry("1100x750")
+        self.root.minsize(900, 650)
         self.root.configure(bg=self.COLORS['bg'])
 
-        # 设置图标（如果有）
+        # 设置图标
         try:
             self.root.iconbitmap(default='')
         except Exception:
@@ -50,6 +60,8 @@ class CleanerGUI:
         self.check_vars: Dict[str, Dict[str, tk.BooleanVar]] = {}
         self.is_scanning = False
         self.is_cleaning = False
+        self.scan_thread = None
+        self.clean_thread = None
 
         self._setup_styles()
         self._build_ui()
@@ -57,61 +69,82 @@ class CleanerGUI:
 
         # 检查管理员权限
         if not is_admin():
-            self.status_var.set("⚠️ 建议以管理员身份运行以获得更好的清理效果")
+            self._show_admin_warning()
+
+    def _show_admin_warning(self):
+        """显示管理员权限提示"""
+        warn_frame = tk.Frame(self.root, bg=self.COLORS['warning'], height=36)
+        warn_frame.pack(fill=tk.X, side=tk.TOP)
+        warn_frame.pack_propagate(False)
+
+        lbl = tk.Label(
+            warn_frame,
+            text="⚠️ 建议以管理员身份运行以获得最佳清理效果  [点击以管理员身份重启]",
+            bg=self.COLORS['warning'], fg=self.COLORS['white'],
+            font=('Microsoft YaHei', 10), cursor='hand2'
+        )
+        lbl.pack(expand=True, fill=tk.BOTH)
+        lbl.bind('<Button-1>', lambda e: run_as_admin())
 
     def _setup_styles(self):
         """配置 ttk 样式"""
         style = ttk.Style()
         style.theme_use('clam')
 
+        # 自定义样式
         style.configure('Title.TLabel',
                         font=('Microsoft YaHei', 16, 'bold'),
                         foreground=self.COLORS['text'],
-                        background=self.COLORS['bg'])
+                        background=self.COLORS['card_bg'])
 
         style.configure('Header.TLabel',
                         font=('Microsoft YaHei', 12, 'bold'),
-                        foreground=self.COLORS['text'],
-                        background=self.COLORS['bg'])
-
-        style.configure('Normal.TLabel',
-                        font=('Microsoft YaHei', 10),
-                        foreground=self.COLORS['text'],
-                        background=self.COLORS['bg'])
-
-        style.configure('Light.TLabel',
-                        font=('Microsoft YaHei', 9),
-                        foreground=self.COLORS['text_light'],
-                        background=self.COLORS['bg'])
-
-        style.configure('Scan.TButton',
-                        font=('Microsoft YaHei', 11, 'bold'),
-                        padding=(20, 8))
-
-        style.configure('Clean.TButton',
-                        font=('Microsoft YaHei', 11, 'bold'),
-                        padding=(20, 8))
-
-        style.configure('Stop.TButton',
-                        font=('Microsoft YaHei', 11, 'bold'),
-                        padding=(20, 8))
+                        foreground=self.COLORS['text'])
 
         style.configure('Status.TLabel',
                         font=('Microsoft YaHei', 9),
-                        foreground=self.COLORS['text_light'],
-                        background=self.COLORS['bg'])
+                        foreground=self.COLORS['text_light'])
 
-        style.configure('Category.TLabelframe',
+        style.configure('Size.TLabel',
+                        font=('Microsoft YaHei', 9),
+                        foreground=self.COLORS['primary'])
+
+        style.configure('Primary.TButton',
                         font=('Microsoft YaHei', 10, 'bold'),
-                        background=self.COLORS['card_bg'])
+                        padding=(15, 8))
 
-        style.configure('Category.TLabelframe.Label',
+        style.configure('Success.TButton',
                         font=('Microsoft YaHei', 10, 'bold'),
-                        foreground=self.COLORS['text'])
+                        padding=(15, 8))
 
-        style.configure('Progress.Horizontal.TProgressbar',
+        style.configure('Danger.TButton',
+                        font=('Microsoft YaHei', 10, 'bold'),
+                        padding=(15, 8))
+
+        style.configure('Card.TFrame',
+                        background=self.COLORS['card_bg'],
+                        relief='solid',
+                        borderwidth=1)
+
+        style.configure('Progressbar.Horizontal',
                         background=self.COLORS['primary'],
                         troughcolor=self.COLORS['progress_bg'])
+
+        style.configure('Treeview',
+                        font=('Microsoft YaHei', 9),
+                        rowheight=28,
+                        background=self.COLORS['white'],
+                        fieldbackground=self.COLORS['white'])
+
+        style.configure('Treeview.Heading',
+                        font=('Microsoft YaHei', 9, 'bold'),
+                        background=self.COLORS['primary'],
+                        foreground=self.COLORS['white'])
+
+        style.map('Treeview',
+                  background=[('selected', self.COLORS['primary_light']),
+                              ('hover', self.COLORS['hover'])],
+                  foreground=[('selected', self.COLORS['text'])])
 
     def _center_window(self):
         """窗口居中"""
@@ -122,47 +155,66 @@ class CleanerGUI:
         sh = self.root.winfo_screenheight()
         x = (sw - w) // 2
         y = (sh - h) // 2
-        self.root.geometry(f"{w}x{h}+{x}+{y}")
+        self.root.geometry(f'+{x}+{y}')
 
     def _build_ui(self):
-        """构建界面"""
+        """构建主界面"""
         # 主容器
-        main_frame = tk.Frame(self.root, bg=self.COLORS['bg'])
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        main_container = tk.Frame(self.root, bg=self.COLORS['bg'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # ===== 顶部标题栏 =====
-        header_frame = tk.Frame(main_frame, bg=self.COLORS['bg'])
+        # ========== 顶部标题栏 ==========
+        header_frame = tk.Frame(main_container, bg=self.COLORS['card_bg'],
+                                relief='solid', borderwidth=1)
         header_frame.pack(fill=tk.X, pady=(0, 10))
 
-        title_label = ttk.Label(
-            header_frame,
-            text="🧹 C盘清理工具",
-            style='Title.TLabel'
-        )
-        title_label.pack(side=tk.LEFT)
+        title_frame = tk.Frame(header_frame, bg=self.COLORS['card_bg'])
+        title_frame.pack(fill=tk.X, padx=20, pady=15)
 
-        # 系统信息
-        sys_info = f"系统盘: {self.cleaner.drive}  |  用户: {os.environ.get('USERNAME', 'Unknown')}"
-        sys_label = ttk.Label(
-            header_frame,
-            text=sys_info,
-            style='Light.TLabel'
-        )
-        sys_label.pack(side=tk.RIGHT, pady=5)
+        # 标题和图标
+        tk.Label(title_frame, text="🧹", font=('Segoe UI Emoji', 28),
+                 bg=self.COLORS['card_bg']).pack(side=tk.LEFT, padx=(0, 10))
 
-        # ===== 操作按钮栏 =====
-        btn_frame = tk.Frame(main_frame, bg=self.COLORS['bg'])
-        btn_frame.pack(fill=tk.X, pady=(0, 10))
+        text_frame = tk.Frame(title_frame, bg=self.COLORS['card_bg'])
+        text_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(text_frame, text="C盘清理大师",
+                 font=('Microsoft YaHei', 20, 'bold'),
+                 fg=self.COLORS['primary_dark'],
+                 bg=self.COLORS['card_bg']).pack(anchor=tk.W)
+
+        tk.Label(text_frame,
+                 text="全面扫描 · 深度清理 · 释放磁盘空间",
+                 font=('Microsoft YaHei', 9),
+                 fg=self.COLORS['text_light'],
+                 bg=self.COLORS['card_bg']).pack(anchor=tk.W)
+
+        # 右侧统计信息
+        stats_frame = tk.Frame(title_frame, bg=self.COLORS['card_bg'])
+        stats_frame.pack(side=tk.RIGHT)
+
+        self.stats_label = tk.Label(
+            stats_frame,
+            text="就绪 | 上次清理: 未执行",
+            font=('Microsoft YaHei', 9),
+            fg=self.COLORS['text_light'],
+            bg=self.COLORS['card_bg']
+        )
+        self.stats_label.pack()
+
+        # ========== 工具栏 ==========
+        toolbar = tk.Frame(main_container, bg=self.COLORS['bg'])
+        toolbar.pack(fill=tk.X, pady=(0, 10))
+
+        # 左侧按钮组
+        btn_group = tk.Frame(toolbar, bg=self.COLORS['bg'])
+        btn_group.pack(side=tk.LEFT)
 
         self.scan_btn = tk.Button(
-            btn_frame,
-            text="🔍 开始扫描",
-            font=('Microsoft YaHei', 11, 'bold'),
-            bg=self.COLORS['primary'],
-            fg=self.COLORS['white'],
-            padx=25, pady=8,
-            border=0,
-            cursor='hand2',
+            btn_group, text="🔍 开始扫描",
+            font=('Microsoft YaHei', 10, 'bold'),
+            bg=self.COLORS['primary'], fg=self.COLORS['white'],
+            padx=20, pady=8, border=0, cursor='hand2',
             activebackground=self.COLORS['primary_dark'],
             activeforeground=self.COLORS['white'],
             command=self._start_scan
@@ -170,465 +222,450 @@ class CleanerGUI:
         self.scan_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.clean_btn = tk.Button(
-            btn_frame,
-            text="🗑️ 清理选中项",
-            font=('Microsoft YaHei', 11, 'bold'),
-            bg=self.COLORS['success'],
-            fg=self.COLORS['white'],
-            padx=25, pady=8,
-            border=0,
-            cursor='hand2',
-            state=tk.DISABLED,
+            btn_group, text="🗑️ 清理选中项",
+            font=('Microsoft YaHei', 10, 'bold'),
+            bg=self.COLORS['success'], fg=self.COLORS['white'],
+            padx=20, pady=8, border=0, cursor='hand2',
             activebackground='#388E3C',
             activeforeground=self.COLORS['white'],
-            command=self._start_clean
+            command=self._start_clean,
+            state=tk.DISABLED
         )
         self.clean_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        self.stop_btn = tk.Button(
-            btn_frame,
-            text="⏹️ 停止",
-            font=('Microsoft YaHei', 11, 'bold'),
-            bg=self.COLORS['danger'],
-            fg=self.COLORS['white'],
-            padx=25, pady=8,
-            border=0,
-            cursor='hand2',
-            state=tk.DISABLED,
-            activebackground='#D32F2F',
-            activeforeground=self.COLORS['white'],
-            command=self._stop_operation
-        )
-        self.stop_btn.pack(side=tk.LEFT)
-
-        # 全选/取消
-        self.select_all_var = tk.BooleanVar(value=True)
-        select_all_cb = tk.Checkbutton(
-            btn_frame,
-            text="全选",
-            font=('Microsoft YaHei', 10),
-            variable=self.select_all_var,
-            bg=self.COLORS['bg'],
-            fg=self.COLORS['text'],
-            selectcolor=self.COLORS['white'],
-            activebackground=self.COLORS['bg'],
+        self.select_all_btn = tk.Button(
+            btn_group, text="☑️ 全选",
+            font=('Microsoft YaHei', 9),
+            bg=self.COLORS['white'], fg=self.COLORS['text'],
+            padx=12, pady=6, border=1, cursor='hand2',
+            relief='solid', bd=1,
             command=self._toggle_all
         )
-        select_all_cb.pack(side=tk.RIGHT, padx=(10, 0))
+        self.select_all_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        # ===== 进度条 =====
-        progress_frame = tk.Frame(main_frame, bg=self.COLORS['bg'])
-        progress_frame.pack(fill=tk.X, pady=(0, 5))
+        # 右侧信息
+        self.status_var = tk.StringVar(value="就绪，点击「开始扫描」分析 C 盘")
+        status_label = tk.Label(
+            toolbar, textvariable=self.status_var,
+            font=('Microsoft YaHei', 9),
+            fg=self.COLORS['text_light'], bg=self.COLORS['bg']
+        )
+        status_label.pack(side=tk.RIGHT, padx=(10, 0))
+
+        # ========== 进度条 ==========
+        progress_frame = tk.Frame(main_container, bg=self.COLORS['bg'])
+        progress_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.progress_bar = ttk.Progressbar(
-            progress_frame,
-            mode='determinate',
-            style='Progress.Horizontal.TProgressbar',
+            progress_frame, mode='determinate',
+            style='Progressbar.Horizontal',
             length=200
         )
         self.progress_bar.pack(fill=tk.X, expand=True)
 
-        self.progress_label = ttk.Label(
-            progress_frame,
-            text="就绪",
-            style='Light.TLabel'
+        self.progress_label = tk.Label(
+            progress_frame, text="",
+            font=('Microsoft YaHei', 8),
+            fg=self.COLORS['text_light'], bg=self.COLORS['bg']
         )
-        self.progress_label.pack(pady=(2, 0))
+        self.progress_label.pack()
 
-        # ===== 扫描结果区域（可滚动） =====
-        result_frame = tk.Frame(main_frame, bg=self.COLORS['bg'])
-        result_frame.pack(fill=tk.BOTH, expand=True)
+        # ========== 主内容区 ==========
+        content_frame = tk.Frame(main_container, bg=self.COLORS['bg'])
+        content_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 使用 Canvas + Scrollbar 实现滚动
-        canvas = tk.Canvas(result_frame, bg=self.COLORS['bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=canvas.yview)
-        self.scrollable_frame = tk.Frame(canvas, bg=self.COLORS['bg'])
+        # 左侧：分类列表
+        left_frame = tk.Frame(content_frame, bg=self.COLORS['card_bg'],
+                              relief='solid', borderwidth=1, width=280)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 10))
+        left_frame.pack_propagate(False)
+
+        tk.Label(left_frame, text="📋 清理项目",
+                 font=('Microsoft YaHei', 11, 'bold'),
+                 fg=self.COLORS['text'],
+                 bg=self.COLORS['card_bg']).pack(anchor=tk.W, padx=12, pady=(12, 8))
+
+        # 分类列表容器（带滚动）
+        list_container = tk.Frame(left_frame, bg=self.COLORS['card_bg'])
+        list_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        self.canvas = tk.Canvas(list_container, bg=self.COLORS['card_bg'],
+                                highlightthickness=0)
+        scrollbar = tk.Scrollbar(list_container, orient=tk.VERTICAL,
+                                 command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas, bg=self.COLORS['card_bg'])
 
         self.scrollable_frame.bind(
             "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         )
 
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
 
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 绑定鼠标滚轮
+        # 鼠标滚轮支持
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-        # ===== 底部状态栏 =====
-        status_frame = tk.Frame(main_frame, bg=self.COLORS['bg'], height=30)
-        status_frame.pack(fill=tk.X, pady=(8, 0))
-        status_frame.pack_propagate(False)
+        # 右侧：详情区域
+        right_frame = tk.Frame(content_frame, bg=self.COLORS['card_bg'],
+                               relief='solid', borderwidth=1)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        self.status_var = tk.StringVar(value="就绪 - 点击「开始扫描」分析C盘垃圾文件")
-        status_label = ttk.Label(
-            status_frame,
-            textvariable=self.status_var,
-            style='Status.TLabel'
+        # 详情标题
+        detail_header = tk.Frame(right_frame, bg=self.COLORS['card_bg'])
+        detail_header.pack(fill=tk.X, padx=12, pady=(12, 8))
+
+        tk.Label(detail_header, text="📄 文件详情",
+                 font=('Microsoft YaHei', 11, 'bold'),
+                 fg=self.COLORS['text'],
+                 bg=self.COLORS['card_bg']).pack(side=tk.LEFT)
+
+        self.detail_count_label = tk.Label(
+            detail_header, text="",
+            font=('Microsoft YaHei', 9),
+            fg=self.COLORS['text_light'], bg=self.COLORS['card_bg']
         )
-        status_label.pack(side=tk.LEFT)
+        self.detail_count_label.pack(side=tk.RIGHT)
 
-        self.size_var = tk.StringVar(value="总计: 0 B")
-        size_label = ttk.Label(
-            status_frame,
-            textvariable=self.size_var,
-            style='Status.TLabel'
+        # 详情列表（Treeview）
+        tree_frame = tk.Frame(right_frame, bg=self.COLORS['card_bg'])
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        columns = ('path', 'size', 'desc')
+        self.tree = ttk.Treeview(tree_frame, columns=columns,
+                                 show='headings', height=12)
+
+        self.tree.heading('path', text='文件路径')
+        self.tree.heading('size', text='大小')
+        self.tree.heading('desc', text='描述')
+
+        self.tree.column('path', width=350, minwidth=200)
+        self.tree.column('size', width=100, minwidth=80, anchor=tk.E)
+        self.tree.column('desc', width=200, minwidth=120)
+
+        # 滚动条
+        tree_scrollbar = tk.Scrollbar(tree_frame, orient=tk.VERTICAL,
+                                      command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_scrollbar.set)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # ========== 底部状态栏 ==========
+        bottom_frame = tk.Frame(main_container, bg=self.COLORS['card_bg'],
+                                relief='solid', borderwidth=1, height=40)
+        bottom_frame.pack(fill=tk.X, pady=(10, 0))
+        bottom_frame.pack_propagate(False)
+
+        self.bottom_status = tk.Label(
+            bottom_frame,
+            text="💡 提示: 扫描前请关闭正在运行的程序以获得更准确的清理结果",
+            font=('Microsoft YaHei', 9),
+            fg=self.COLORS['text_light'], bg=self.COLORS['card_bg'],
+            anchor=tk.W
         )
-        size_label.pack(side=tk.RIGHT)
+        self.bottom_status.pack(fill=tk.X, padx=15, pady=8)
 
-    def _toggle_all(self):
-        """全选/取消全选"""
-        select_all = self.select_all_var.get()
-        for cat_name, items_dict in self.check_vars.items():
-            for item_key, var in items_dict.items():
-                var.set(select_all)
+    def _update_progress(self, current: int, total: int, message: str = ""):
+        """更新进度显示"""
+        if total > 0:
+            pct = int(current / total * 100)
+            self.progress_bar['value'] = pct
+            self.progress_label.config(text=f"{message} ({current}/{total})")
+        else:
+            self.progress_label.config(text=message)
+            self.progress_bar['value'] = 0
+            self.progress_bar.start(10)
 
-    def _clear_results(self):
-        """清空扫描结果"""
+        self.root.update_idletasks()
+
+    def _start_scan(self):
+        """开始扫描"""
+        if self.is_scanning:
+            self.cleaner.stop()
+            return
+
+        # 清空旧数据
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
         self.check_vars = {}
         self.categories = {}
-        self.size_var.set("总计: 0 B")
-
-    def _display_results(self):
-        """显示扫描结果"""
-        self._clear_results()
-
-        if not self.categories:
-            no_data_label = ttk.Label(
-                self.scrollable_frame,
-                text="未发现可清理的垃圾文件",
-                style='Header.TLabel'
-            )
-            no_data_label.pack(pady=50)
-            return
-
-        for cat_name, cat in self.categories.items():
-            self._add_category_card(cat_name, cat)
-
-        # 更新总计
-        total = sum(cat.total_size for cat in self.categories.values())
-        self.size_var.set(f"总计: {format_size(total)}")
-
-    def _add_category_card(self, cat_name: str, cat: CleanCategory):
-        """添加分类卡片"""
-        # 卡片容器
-        card = tk.Frame(
-            self.scrollable_frame,
-            bg=self.COLORS['card_bg'],
-            highlightbackground=self.COLORS['border'],
-            highlightthickness=1,
-            padx=12, pady=8
-        )
-        card.pack(fill=tk.X, pady=(0, 6))
-
-        # 分类标题行
-        title_frame = tk.Frame(card, bg=self.COLORS['card_bg'])
-        title_frame.pack(fill=tk.X)
-
-        # 分类图标和名称
-        cat_icons = {
-            'Windows临时文件': '📁',
-            '用户临时文件': '📂',
-            '浏览器缓存': '🌐',
-            '预读取文件': '⚡',
-            '最近文档': '📄',
-            '下载残留': '⬇️',
-            '回收站': '🗑️',
-            '.NET缓存': '🔧',
-        }
-        icon = cat_icons.get(cat_name, '📦')
-
-        # 分类勾选框
-        cat_var = tk.BooleanVar(value=True)
-        cat_cb = tk.Checkbutton(
-            title_frame,
-            text=f"{icon} {cat_name}",
-            font=('Microsoft YaHei', 11, 'bold'),
-            variable=cat_var,
-            bg=self.COLORS['card_bg'],
-            fg=self.COLORS['text'],
-            selectcolor=self.COLORS['white'],
-            activebackground=self.COLORS['card_bg'],
-            command=lambda cn=cat_name, cv=cat_var: self._toggle_category(cn, cv)
-        )
-        cat_cb.pack(side=tk.LEFT)
-
-        # 大小和文件数
-        info_label = tk.Label(
-            title_frame,
-            text=f"{format_size(cat.total_size)}  ({len(cat.items)} 个文件)",
-            font=('Microsoft YaHei', 10),
-            bg=self.COLORS['card_bg'],
-            fg=self.COLORS['text_light']
-        )
-        info_label.pack(side=tk.RIGHT)
-
-        # 文件列表（可展开）
-        if len(cat.items) <= 10:
-            # 直接显示
-            for item in cat.items[:10]:
-                self._add_item_row(card, cat_name, item)
-        else:
-            # 显示前10个 + "更多"按钮
-            for item in cat.items[:10]:
-                self._add_item_row(card, cat_name, item)
-
-            more_label = tk.Label(
-                card,
-                text=f"... 还有 {len(cat.items) - 10} 个文件",
-                font=('Microsoft YaHei', 9, 'italic'),
-                bg=self.COLORS['card_bg'],
-                fg=self.COLORS['text_light'],
-                cursor='hand2'
-            )
-            more_label.pack(anchor=tk.W, padx=(35, 0), pady=(2, 0))
-
-        # 存储分类变量
-        if cat_name not in self.check_vars:
-            self.check_vars[cat_name] = {}
-
-    def _add_item_row(self, parent, cat_name: str, item: CleanItem):
-        """添加文件行"""
-        row = tk.Frame(parent, bg=self.COLORS['card_bg'])
-        row.pack(fill=tk.X, padx=(20, 0), pady=(1, 0))
-
-        # 文件勾选框
-        item_key = f"{cat_name}::{item.path}"
-        var = tk.BooleanVar(value=True)
-        cb = tk.Checkbutton(
-            row,
-            text="",
-            variable=var,
-            bg=self.COLORS['card_bg'],
-            selectcolor=self.COLORS['white'],
-            activebackground=self.COLORS['card_bg']
-        )
-        cb.pack(side=tk.LEFT)
-
-        # 存储变量
-        if cat_name not in self.check_vars:
-            self.check_vars[cat_name] = {}
-        self.check_vars[cat_name][item_key] = var
-
-        # 文件名
-        fname = os.path.basename(item.path) or item.path
-        name_label = tk.Label(
-            row,
-            text=fname,
-            font=('Microsoft YaHei', 9),
-            bg=self.COLORS['card_bg'],
-            fg=self.COLORS['text'],
-            anchor=tk.W
-        )
-        name_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        # 文件大小
-        size_label = tk.Label(
-            row,
-            text=format_size(item.size),
-            font=('Microsoft YaHei', 9),
-            bg=self.COLORS['card_bg'],
-            fg=self.COLORS['text_light'],
-            width=10,
-            anchor=tk.E
-        )
-        size_label.pack(side=tk.RIGHT)
-
-    def _toggle_category(self, cat_name: str, cat_var: tk.BooleanVar):
-        """切换分类下所有文件的选择状态"""
-        if cat_name in self.check_vars:
-            for var in self.check_vars[cat_name].values():
-                var.set(cat_var.get())
-
-    def _get_selected_items(self) -> List[CleanItem]:
-        """获取用户选中的清理项"""
-        selected = []
-        for cat_name, items_dict in self.check_vars.items():
-            if cat_name in self.categories:
-                cat = self.categories[cat_name]
-                for item in cat.items:
-                    item_key = f"{cat_name}::{item.path}"
-                    if item_key in items_dict and items_dict[item_key].get():
-                        selected.append(item)
-        return selected
-
-    def _start_scan(self):
-        """开始扫描（后台线程）"""
-        if self.is_scanning:
-            return
+        self.tree.delete(*self.tree.get_children())
+        self.clean_btn.config(state=tk.DISABLED)
+        self.detail_count_label.config(text="")
 
         self.is_scanning = True
-        self.scan_btn.config(state=tk.DISABLED)
-        self.clean_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
+        self.scan_btn.config(text="⏹ 停止扫描", bg=self.COLORS['danger'])
+        self.status_var.set("正在扫描 C 盘，请稍候...")
+        self.bottom_status.config(text="⏳ 正在扫描系统各分区...")
         self.progress_bar['value'] = 0
-        self.progress_label.config(text="正在扫描...")
-        self.status_var.set("🔍 正在扫描C盘垃圾文件，请稍候...")
-        self._clear_results()
 
         def scan_thread():
             try:
-                categories = self.cleaner.scan_all(progress_callback=self._update_scan_progress)
-                self.root.after(0, self._on_scan_complete, categories)
+                self.cleaner.scan_all(progress_callback=self._update_progress)
+                self.root.after(0, self._on_scan_complete)
             except Exception as e:
-                self.root.after(0, self._on_scan_error, str(e))
+                self.root.after(0, lambda: self._on_scan_error(str(e)))
 
-        thread = threading.Thread(target=scan_thread, daemon=True)
-        thread.start()
+        self.scan_thread = threading.Thread(target=scan_thread, daemon=True)
+        self.scan_thread.start()
 
-    def _update_scan_progress(self, current: int, total: int, cat_name: str):
-        """更新扫描进度"""
-        def update():
-            pct = int((current / total) * 100)
-            self.progress_bar['value'] = pct
-            self.progress_label.config(text=f"正在扫描: {cat_name} ({current}/{total})")
-        self.root.after(0, update)
-
-    def _on_scan_complete(self, categories: Dict[str, CleanCategory]):
+    def _on_scan_complete(self):
         """扫描完成回调"""
-        self.categories = categories
         self.is_scanning = False
-        self.scan_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
+        self.scan_btn.config(text="🔍 重新扫描", bg=self.COLORS['primary'])
+        self.progress_bar.stop()
         self.progress_bar['value'] = 100
-        self.progress_label.config(text="扫描完成")
 
-        total_size = sum(cat.total_size for cat in categories.values())
-        total_files = sum(len(cat.items) for cat in categories.values())
+        self.categories = self.cleaner.categories
+        if not self.categories:
+            self.status_var.set("扫描完成，未发现可清理的垃圾文件 ✅")
+            self.bottom_status.config(text="✅ 系统很干净，无需清理")
+            return
 
-        if total_size > 0:
-            self.status_var.set(
-                f"✅ 扫描完成！发现 {total_files} 个垃圾文件，可释放 {format_size(total_size)}"
-            )
-            self.clean_btn.config(state=tk.NORMAL)
-        else:
-            self.status_var.set("✅ 扫描完成！未发现可清理的垃圾文件")
-            self.clean_btn.config(state=tk.DISABLED)
+        # 显示分类列表
+        self._display_categories()
 
-        self._display_results()
+        # 统计
+        total_items = sum(len(cat.items) for cat in self.categories.values())
+        total_size = sum(cat.total_size for cat in self.categories.values())
 
-    def _on_scan_error(self, error_msg: str):
-        """扫描出错回调"""
+        self.status_var.set(
+            f"扫描完成！发现 {total_items} 项垃圾文件，共 {format_size(total_size)}"
+        )
+        self.bottom_status.config(
+            text=f"✅ 扫描完成 | 共 {len(self.categories)} 个分类，"
+                 f"{total_items} 个文件，可释放 {format_size(total_size)}"
+        )
+        self.clean_btn.config(state=tk.NORMAL)
+
+    def _on_scan_error(self, error: str):
+        """扫描错误回调"""
         self.is_scanning = False
-        self.scan_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.progress_bar['value'] = 0
-        self.progress_label.config(text="扫描失败")
-        self.status_var.set(f"❌ 扫描出错: {error_msg}")
-        messagebox.showerror("扫描错误", f"扫描过程中出现错误:\n{error_msg}")
+        self.scan_btn.config(text="🔍 重新扫描", bg=self.COLORS['primary'])
+        self.progress_bar.stop()
+        self.status_var.set(f"扫描出错: {error}")
+        self.bottom_status.config(text=f"❌ 扫描出错: {error}")
+
+    def _display_categories(self):
+        """显示分类列表"""
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+
+        row = 0
+        for cat_name, category in self.categories.items():
+            if not category.items:
+                continue
+
+            # 分类卡片
+            card = tk.Frame(self.scrollable_frame, bg=self.COLORS['white'],
+                            relief='solid', borderwidth=1)
+            card.pack(fill=tk.X, padx=4, pady=3)
+
+            # 复选框 + 分类名 + 大小
+            var = tk.BooleanVar(value=True)
+            if cat_name not in self.check_vars:
+                self.check_vars[cat_name] = {}
+
+            cb = tk.Checkbutton(
+                card, text=f"  {category.name}",
+                variable=var,
+                font=('Microsoft YaHei', 10),
+                fg=self.COLORS['text'],
+                bg=self.COLORS['white'],
+                activebackground=self.COLORS['white'],
+                selectcolor=self.COLORS['white'],
+                command=lambda cn=cat_name: self._on_category_toggle(cn)
+            )
+            cb.pack(side=tk.LEFT, padx=(8, 0), pady=6)
+
+            # 大小标签
+            size_label = tk.Label(
+                card,
+                text=f"{format_size(category.total_size)}",
+                font=('Microsoft YaHei', 9, 'bold'),
+                fg=self.COLORS['primary'],
+                bg=self.COLORS['white']
+            )
+            size_label.pack(side=tk.RIGHT, padx=(0, 12), pady=6)
+
+            # 文件数量
+            count_label = tk.Label(
+                card,
+                text=f"{len(category.items)} 项",
+                font=('Microsoft YaHei', 8),
+                fg=self.COLORS['text_light'],
+                bg=self.COLORS['white']
+            )
+            count_label.pack(side=tk.RIGHT, padx=(0, 5), pady=6)
+
+            # 点击卡片显示详情
+            for item in category.items:
+                self.check_vars[cat_name][item.path] = var
+
+            card.bind('<Button-1>', lambda e, cn=cat_name: self._show_category_detail(cn))
+            cb.bind('<Button-1>', lambda e, cn=cat_name: self._show_category_detail(cn))
+
+            row += 1
+
+    def _show_category_detail(self, cat_name: str):
+        """显示分类详情"""
+        self.tree.delete(*self.tree.get_children())
+        category = self.categories.get(cat_name)
+        if not category:
+            return
+
+        for item in category.items:
+            self.tree.insert('', tk.END, values=(
+                item.path,
+                format_size(item.size),
+                item.description
+            ))
+
+        self.detail_count_label.config(
+            text=f"{len(category.items)} 项 | {format_size(category.total_size)}"
+        )
+
+    def _on_category_toggle(self, cat_name: str):
+        """分类复选框切换"""
+        pass  # 由 check_vars 自动管理
+
+    def _toggle_all(self):
+        """全选/取消全选"""
+        all_selected = all(
+            var.get()
+            for cat_vars in self.check_vars.values()
+            for var in cat_vars.values()
+        )
+
+        new_state = not all_selected
+        for cat_vars in self.check_vars.values():
+            for var in cat_vars.values():
+                var.set(new_state)
+
+        self.select_all_btn.config(
+            text="☑️ 取消全选" if new_state else "☑️ 全选"
+        )
 
     def _start_clean(self):
-        """开始清理（后台线程）"""
+        """开始清理"""
         if self.is_cleaning:
+            self.cleaner.stop()
             return
 
-        selected = self._get_selected_items()
-        if not selected:
-            messagebox.showinfo("提示", "请先选择要清理的文件")
+        # 收集选中的项目
+        items_to_clean = []
+        for cat_name, cat_vars in self.check_vars.items():
+            category = self.categories.get(cat_name)
+            if not category:
+                continue
+            for item in category.items:
+                if cat_vars.get(item.path, tk.BooleanVar()).get():
+                    items_to_clean.append(item)
+
+        if not items_to_clean:
+            messagebox.showinfo("提示", "请先选择要清理的项目")
             return
 
-        total_size = sum(item.size for item in selected)
+        total_size = sum(item.size for item in items_to_clean)
+
+        # 确认对话框
         result = messagebox.askyesno(
             "确认清理",
-            f"确定要清理 {len(selected)} 个文件吗？\n"
-            f"预计可释放空间: {format_size(total_size)}\n\n"
-            f"⚠️ 清理后文件将被永久删除！"
+            f"确定要清理 {len(items_to_clean)} 项文件吗？\n"
+            f"预计释放空间: {format_size(total_size)}\n\n"
+            f"⚠️ 清理后文件将无法恢复！"
         )
         if not result:
             return
 
         self.is_cleaning = True
+        self.clean_btn.config(text="⏹ 停止清理", bg=self.COLORS['danger'])
         self.scan_btn.config(state=tk.DISABLED)
-        self.clean_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
+        self.status_var.set(f"正在清理 {len(items_to_clean)} 项文件...")
         self.progress_bar['value'] = 0
-        self.progress_label.config(text="正在清理...")
-        self.status_var.set("🗑️ 正在清理垃圾文件...")
 
         def clean_thread():
             try:
-                success, failed = self.cleaner.delete_items(
-                    selected,
-                    delete_callback=self._update_clean_progress
+                success, failed = self.cleaner.clean_items(
+                    items_to_clean,
+                    callback=lambda c, t, m: self.root.after(
+                        0, lambda: self._update_progress(c, t, m)
+                    )
                 )
-                self.root.after(0, self._on_clean_complete, success, failed)
+                self.root.after(0, lambda: self._on_clean_complete(
+                    success, failed, len(items_to_clean)
+                ))
             except Exception as e:
-                self.root.after(0, self._on_clean_error, str(e))
+                self.root.after(0, lambda: self._on_clean_error(str(e)))
 
-        thread = threading.Thread(target=clean_thread, daemon=True)
-        thread.start()
+        self.clean_thread = threading.Thread(target=clean_thread, daemon=True)
+        self.clean_thread.start()
 
-    def _update_clean_progress(self, current: int, total: int, description: str):
-        """更新清理进度"""
-        def update():
-            pct = int((current / total) * 100)
-            self.progress_bar['value'] = pct
-            self.progress_label.config(text=f"正在清理: {current}/{total}")
-            self.status_var.set(f"🗑️ 正在清理: {description}")
-        self.root.after(0, update)
-
-    def _on_clean_complete(self, success: int, failed: int):
+    def _on_clean_complete(self, success: int, failed: int, total: int):
         """清理完成回调"""
         self.is_cleaning = False
+        self.clean_btn.config(text="🗑️ 清理选中项", bg=self.COLORS['success'])
         self.scan_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
         self.progress_bar['value'] = 100
-        self.progress_label.config(text="清理完成")
+
+        freed_size = sum(
+            item.size for cat in self.categories.values()
+            for item in cat.items
+        )
+
+        self.status_var.set(
+            f"清理完成！成功: {success}, 失败: {failed}"
+        )
+        self.bottom_status.config(
+            text=f"✅ 清理完成 | 成功清理 {success}/{total} 项"
+        )
+
+        # 更新统计
+        self.stats_label.config(
+            text=f"上次清理: {datetime.now().strftime('%H:%M:%S')}"
+        )
 
         if failed > 0:
-            self.status_var.set(
-                f"✅ 清理完成！成功清理 {success} 个文件，{failed} 个文件清理失败（可能正在使用）"
-            )
             messagebox.showwarning(
                 "清理结果",
-                f"成功清理: {success} 个文件\n"
-                f"清理失败: {failed} 个文件（可能正在被系统使用）\n\n"
-                f"💡 提示：重启电脑后再次清理可能解决"
+                f"清理完成\n\n"
+                f"✅ 成功: {success} 项\n"
+                f"❌ 失败: {failed} 项\n\n"
+                f"部分文件可能正在使用中，请关闭相关程序后重试"
             )
         else:
-            self.status_var.set(f"✅ 清理完成！成功清理 {success} 个文件")
             messagebox.showinfo(
                 "清理完成",
-                f"成功清理 {success} 个垃圾文件！\n"
-                f"💡 建议定期清理以保持系统流畅"
+                f"✅ 成功清理 {success} 项垃圾文件！\n"
+                f"💾 释放了宝贵的磁盘空间"
             )
 
-        self.clean_btn.config(state=tk.DISABLED)
-        # 重新扫描以更新状态
+        # 重新扫描
         self._start_scan()
 
-    def _on_clean_error(self, error_msg: str):
-        """清理出错回调"""
+    def _on_clean_error(self, error: str):
+        """清理错误回调"""
         self.is_cleaning = False
+        self.clean_btn.config(text="🗑️ 清理选中项", bg=self.COLORS['success'])
         self.scan_btn.config(state=tk.NORMAL)
-        self.clean_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.progress_bar['value'] = 0
-        self.progress_label.config(text="清理失败")
-        self.status_var.set(f"❌ 清理出错: {error_msg}")
-        messagebox.showerror("清理错误", f"清理过程中出现错误:\n{error_msg}")
-
-    def _stop_operation(self):
-        """停止当前操作"""
-        self.cleaner.stop()
-        self.status_var.set("⏹️ 正在停止...")
-        self.stop_btn.config(state=tk.DISABLED)
+        self.progress_bar.stop()
+        self.status_var.set(f"清理出错: {error}")
+        self.bottom_status.config(text=f"❌ 清理出错: {error}")
 
     def run(self):
-        """运行应用"""
+        """运行主循环"""
         self.root.mainloop()
 
 
 def main():
-    """入口函数"""
+    """启动入口"""
     app = CleanerGUI()
     app.run()
 

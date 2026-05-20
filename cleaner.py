@@ -1,6 +1,6 @@
 """
-C盘清理工具 - 核心清理引擎
-扫描和清理 Windows 系统垃圾文件
+C盘清理大师 - 核心清理引擎
+扫描和清理 Windows 系统垃圾文件，功能对标专业清理工具
 """
 
 import os
@@ -9,9 +9,13 @@ import tempfile
 import glob
 import ctypes
 import sys
+import hashlib
+import subprocess
+import time
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, field
+from collections import defaultdict
 
 
 @dataclass
@@ -62,8 +66,19 @@ def get_user_profile() -> str:
     return os.environ.get('USERPROFILE', '')
 
 
+def run_as_admin():
+    """以管理员权限重新启动"""
+    try:
+        ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, " ".join(sys.argv), None, 1
+        )
+        sys.exit(0)
+    except Exception:
+        pass
+
+
 class WindowsCleaner:
-    """Windows 系统清理器"""
+    """Windows 系统清理器 - 专业版"""
 
     # 临时文件扩展名
     TEMP_EXTENSIONS = [
@@ -75,20 +90,17 @@ class WindowsCleaner:
     # 缓存文件夹名称
     CACHE_FOLDERS = [
         'Cache', 'cache', 'CACHE',
-        'Temp', 'temp', 'TEMP',
-        'Temporary Internet Files',
-        'INetCache',
-        'Code Cache',
-        'GPUCache',
-        'ServiceWorkerCache',
+        'caches', 'Caches', 'CACHES',
+        '缓存', 'temp', 'Temp', 'TEMP',
+        'tmp', 'Tmp', 'TMP',
     ]
 
-    def __init__(self, drive: str = None):
-        self.drive = drive or get_windows_drive()
+    def __init__(self):
+        self.drive = get_windows_drive()
         self.user_profile = get_user_profile()
         self.categories: Dict[str, CleanCategory] = {}
-        self.total_size = 0
         self._stop_flag = False
+        self._progress_callback = None
 
     def stop(self):
         """停止扫描"""
@@ -96,345 +108,725 @@ class WindowsCleaner:
 
     def reset(self):
         """重置状态"""
-        self.categories = {}
-        self.total_size = 0
         self._stop_flag = False
+        self.categories = {}
 
-    def scan_windows_temp(self) -> List[CleanItem]:
-        """扫描 Windows 临时文件夹"""
-        items = []
-        temp_paths = [
-            os.environ.get('TEMP', ''),
-            os.environ.get('TMP', ''),
-            os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'Temp'),
-        ]
+    def set_progress_callback(self, callback):
+        """设置进度回调"""
+        self._progress_callback = callback
 
-        for temp_dir in temp_paths:
-            if not temp_dir or not os.path.exists(temp_dir):
-                continue
-            try:
-                for root, dirs, files in os.walk(temp_dir):
-                    if self._stop_flag:
-                        break
-                    # 跳过正在使用的文件
-                    for f in files:
-                        try:
-                            fpath = os.path.join(root, f)
-                            try:
-                                size = os.path.getsize(fpath)
-                            except (OSError, PermissionError):
-                                size = 0
-                            if size > 0:
-                                items.append(CleanItem(
-                                    path=fpath,
-                                    size=size,
-                                    category='Windows临时文件',
-                                    description=f'临时文件: {f}'
-                                ))
-                        except (OSError, PermissionError):
-                            continue
-            except (OSError, PermissionError):
-                continue
-            if self._stop_flag:
-                break
-        return items
+    def _report_progress(self, current: int, total: int, message: str = ""):
+        """报告进度"""
+        if self._progress_callback:
+            self._progress_callback(current, total, message)
 
-    def scan_recycle_bin(self) -> List[CleanItem]:
-        """扫描回收站（仅获取大小信息）"""
-        items = []
+    def _add_item(self, category_name: str, item: CleanItem):
+        """添加清理项到分类"""
+        if category_name not in self.categories:
+            self.categories[category_name] = CleanCategory(name=category_name)
+        self.categories[category_name].items.append(item)
+        self.categories[category_name].total_size += item.size
+
+    def _safe_scan_dir(self, directory: str, pattern: str = "*") -> List[str]:
+        """安全扫描目录，忽略权限错误"""
+        results = []
         try:
-            # 回收站路径
-            recycle_path = os.path.join(self.drive, '$Recycle.Bin')
-            if os.path.exists(recycle_path):
-                total_size = 0
-                for root, dirs, files in os.walk(recycle_path):
+            if os.path.isdir(directory):
+                for entry in glob.glob(os.path.join(directory, pattern), recursive=True):
                     if self._stop_flag:
                         break
-                    for f in files:
-                        try:
-                            fpath = os.path.join(root, f)
-                            try:
-                                total_size += os.path.getsize(fpath)
-                            except (OSError, PermissionError):
-                                pass
-                        except (OSError, PermissionError):
-                            continue
-                if total_size > 0:
-                    items.append(CleanItem(
-                        path=recycle_path,
-                        size=total_size,
-                        category='回收站',
-                        description=f'回收站文件 (共 {format_size(total_size)})'
-                    ))
-        except (OSError, PermissionError):
+                    results.append(entry)
+        except (PermissionError, OSError):
             pass
-        return items
+        return results
 
-    def scan_user_temp(self) -> List[CleanItem]:
-        """扫描用户临时文件夹"""
-        items = []
-        if not self.user_profile:
-            return items
+    def _safe_get_size(self, path: str) -> int:
+        """安全获取文件大小"""
+        try:
+            if os.path.isfile(path):
+                return os.path.getsize(path)
+            elif os.path.isdir(path):
+                return self._get_dir_size(path)
+        except (PermissionError, OSError):
+            pass
+        return 0
 
+    def _get_dir_size(self, directory: str) -> int:
+        """获取目录大小"""
+        total = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(directory):
+                if self._stop_flag:
+                    break
+                for f in filenames:
+                    try:
+                        fp = os.path.join(dirpath, f)
+                        if os.path.isfile(fp):
+                            total += os.path.getsize(fp)
+                    except (PermissionError, OSError):
+                        pass
+        except (PermissionError, OSError):
+            pass
+        return total
+
+    # ============================================================
+    # 模块 1: Windows 临时文件清理
+    # ============================================================
+    def scan_windows_temp(self) -> CleanCategory:
+        """扫描 Windows 临时文件"""
+        cat = CleanCategory(name="Windows 临时文件")
         temp_dirs = [
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Temp'),
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'INetCache'),
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'Temporary Internet Files'),
+            tempfile.gettempdir(),
+            os.path.join(self.drive, 'Windows', 'Temp'),
+            os.path.join(self.user_profile, 'Local Settings', 'Temp'),
         ]
 
         for temp_dir in temp_dirs:
-            if not os.path.exists(temp_dir):
-                continue
-            try:
-                for root, dirs, files in os.walk(temp_dir):
-                    if self._stop_flag:
-                        break
-                    for f in files:
-                        try:
-                            fpath = os.path.join(root, f)
-                            try:
-                                size = os.path.getsize(fpath)
-                            except (OSError, PermissionError):
-                                size = 0
-                            if size > 0:
-                                items.append(CleanItem(
-                                    path=fpath,
-                                    size=size,
-                                    category='用户临时文件',
-                                    description=f'用户临时文件: {f}'
-                                ))
-                        except (OSError, PermissionError):
-                            continue
-            except (OSError, PermissionError):
-                continue
             if self._stop_flag:
                 break
-        return items
+            if not os.path.isdir(temp_dir):
+                continue
 
-    def scan_browser_cache(self) -> List[CleanItem]:
+            # 扫描临时文件
+            for ext in self.TEMP_EXTENSIONS:
+                if self._stop_flag:
+                    break
+                files = self._safe_scan_dir(temp_dir, ext)
+                for f in files:
+                    size = self._safe_get_size(f)
+                    if size > 0:
+                        cat.items.append(CleanItem(
+                            path=f, size=size,
+                            category="Windows 临时文件",
+                            description=f"临时文件 ({os.path.basename(f)})"
+                        ))
+                        cat.total_size += size
+
+        return cat
+
+    # ============================================================
+    # 模块 2: 回收站清理
+    # ============================================================
+    def scan_recycle_bin(self) -> CleanCategory:
+        """扫描回收站"""
+        cat = CleanCategory(name="回收站")
+        recycle_path = os.path.join(self.drive, '$Recycle.Bin')
+        if os.path.isdir(recycle_path):
+            size = self._get_dir_size(recycle_path)
+            if size > 0:
+                cat.items.append(CleanItem(
+                    path=recycle_path, size=size,
+                    category="回收站",
+                    description="回收站中的已删除文件"
+                ))
+                cat.total_size = size
+        return cat
+
+    # ============================================================
+    # 模块 3: 浏览器缓存清理
+    # ============================================================
+    def scan_browser_cache(self) -> CleanCategory:
         """扫描浏览器缓存"""
-        items = []
-        if not self.user_profile:
-            return items
+        cat = CleanCategory(name="浏览器缓存")
 
-        # Chrome/Edge 缓存
-        chrome_cache_paths = [
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Default', 'Cache'),
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Default', 'Code Cache'),
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Microsoft', 'Edge', 'User Data', 'Default', 'Cache'),
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Microsoft', 'Edge', 'User Data', 'Default', 'Code Cache'),
-        ]
-
-        for cache_dir in chrome_cache_paths:
-            if not os.path.exists(cache_dir):
-                continue
-            try:
-                total_size = 0
-                file_count = 0
-                for root, dirs, files in os.walk(cache_dir):
-                    if self._stop_flag:
-                        break
-                    for f in files:
-                        try:
-                            fpath = os.path.join(root, f)
-                            try:
-                                total_size += os.path.getsize(fpath)
-                                file_count += 1
-                            except (OSError, PermissionError):
-                                pass
-                        except (OSError, PermissionError):
-                            continue
-                if total_size > 0:
-                    browser_name = 'Chrome' if 'Google' in cache_dir else 'Edge'
-                    items.append(CleanItem(
-                        path=cache_dir,
-                        size=total_size,
-                        category='浏览器缓存',
-                        description=f'{browser_name} 缓存 ({file_count} 个文件, 共 {format_size(total_size)})'
+        # Chrome
+        chrome_cache = os.path.join(
+            self.user_profile, 'AppData', 'Local', 'Google', 'Chrome',
+            'User Data', 'Default', 'Cache'
+        )
+        chrome_code_cache = os.path.join(
+            self.user_profile, 'AppData', 'Local', 'Google', 'Chrome',
+            'User Data', 'Default', 'Code Cache'
+        )
+        for cache_dir in [chrome_cache, chrome_code_cache]:
+            if os.path.isdir(cache_dir):
+                size = self._get_dir_size(cache_dir)
+                if size > 0:
+                    cat.items.append(CleanItem(
+                        path=cache_dir, size=size,
+                        category="浏览器缓存",
+                        description=f"Chrome 缓存 ({os.path.basename(cache_dir)})"
                     ))
-            except (OSError, PermissionError):
-                continue
+                    cat.total_size += size
+
+        # Edge
+        edge_cache = os.path.join(
+            self.user_profile, 'AppData', 'Local', 'Microsoft', 'Edge',
+            'User Data', 'Default', 'Cache'
+        )
+        if os.path.isdir(edge_cache):
+            size = self._get_dir_size(edge_cache)
+            if size > 0:
+                cat.items.append(CleanItem(
+                    path=edge_cache, size=size,
+                    category="浏览器缓存",
+                    description="Edge 缓存"
+                ))
+                cat.total_size += size
+
+        # Firefox
+        firefox_profiles = os.path.join(
+            self.user_profile, 'AppData', 'Local', 'Mozilla', 'Firefox', 'Profiles'
+        )
+        if os.path.isdir(firefox_profiles):
+            for profile in os.listdir(firefox_profiles):
+                if self._stop_flag:
+                    break
+                cache2 = os.path.join(firefox_profiles, profile, 'cache2')
+                if os.path.isdir(cache2):
+                    size = self._get_dir_size(cache2)
+                    if size > 0:
+                        cat.items.append(CleanItem(
+                            path=cache2, size=size,
+                            category="浏览器缓存",
+                            description="Firefox 缓存"
+                        ))
+                        cat.total_size += size
+
+        return cat
+
+    # ============================================================
+    # 模块 4: 系统日志文件
+    # ============================================================
+    def scan_system_logs(self) -> CleanCategory:
+        """扫描系统日志文件"""
+        cat = CleanCategory(name="系统日志")
+        log_dirs = [
+            os.path.join(self.drive, 'Windows', 'Logs'),
+            os.path.join(self.drive, 'Windows', 'Debug'),
+        ]
+        for log_dir in log_dirs:
             if self._stop_flag:
                 break
-        return items
+            if os.path.isdir(log_dir):
+                files = self._safe_scan_dir(log_dir, '*.log')
+                for f in files:
+                    size = self._safe_get_size(f)
+                    if size > 0:
+                        cat.items.append(CleanItem(
+                            path=f, size=size,
+                            category="系统日志",
+                            description=f"日志文件 ({os.path.basename(f)})"
+                        ))
+                        cat.total_size += size
 
-    def scan_prefetch(self) -> List[CleanItem]:
-        """扫描预读取文件"""
-        items = []
-        prefetch_dir = os.path.join(self.drive, 'Windows', 'Prefetch')
-        if not os.path.exists(prefetch_dir):
-            return items
+                # 也扫描 .etl 跟踪日志
+                etl_files = self._safe_scan_dir(log_dir, '*.etl')
+                for f in etl_files:
+                    size = self._safe_get_size(f)
+                    if size > 0:
+                        cat.items.append(CleanItem(
+                            path=f, size=size,
+                            category="系统日志",
+                            description=f"事件跟踪日志 ({os.path.basename(f)})"
+                        ))
+                        cat.total_size += size
+        return cat
 
-        try:
-            for f in os.listdir(prefetch_dir):
-                if self._stop_flag:
-                    break
-                try:
-                    fpath = os.path.join(prefetch_dir, f)
-                    if os.path.isfile(fpath):
-                        size = os.path.getsize(fpath)
-                        if size > 0:
-                            items.append(CleanItem(
-                                path=fpath,
-                                size=size,
-                                category='预读取文件',
-                                description=f'Prefetch: {f}'
-                            ))
-                except (OSError, PermissionError):
-                    continue
-        except (OSError, PermissionError):
-            pass
-        return items
+    # ============================================================
+    # 模块 5: 大文件扫描 (>100MB)
+    # ============================================================
+    def scan_large_files(self, min_size_mb: int = 100) -> CleanCategory:
+        """扫描 C 盘中的大文件"""
+        cat = CleanCategory(name="大文件扫描")
+        min_size = min_size_mb * 1024 * 1024
+        scan_dirs = [
+            self.user_profile,  # 用户目录
+            os.path.join(self.drive, 'ProgramData'),
+        ]
 
-    def scan_recent_documents(self) -> List[CleanItem]:
-        """扫描最近文档记录"""
-        items = []
-        if not self.user_profile:
-            return items
+        # 要排除的目录（系统目录不扫描）
+        exclude_dirs = {
+            'Windows', 'Program Files', 'Program Files (x86)',
+            'System32', 'System', '$Recycle.Bin',
+            'System Volume Information',
+        }
 
-        recent_dir = os.path.join(self.user_profile, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Recent')
-        if not os.path.exists(recent_dir):
-            return items
+        scanned = 0
+        for base_dir in scan_dirs:
+            if self._stop_flag or not os.path.isdir(base_dir):
+                continue
+            try:
+                for dirpath, dirnames, filenames in os.walk(base_dir):
+                    if self._stop_flag:
+                        break
+                    scanned += 1
+                    if scanned % 500 == 0:
+                        self._report_progress(scanned, 0, f"扫描大文件: {dirpath}")
 
-        try:
-            for f in os.listdir(recent_dir):
-                if self._stop_flag:
-                    break
-                try:
-                    fpath = os.path.join(recent_dir, f)
-                    if os.path.isfile(fpath):
-                        size = os.path.getsize(fpath)
-                        if size > 0:
-                            items.append(CleanItem(
-                                path=fpath,
-                                size=size,
-                                category='最近文档',
-                                description=f'最近文档快捷方式: {f}'
-                            ))
-                except (OSError, PermissionError):
-                    continue
-        except (OSError, PermissionError):
-            pass
-        return items
-
-    def scan_downloads_folder(self) -> List[CleanItem]:
-        """扫描下载文件夹中的临时/无用文件"""
-        items = []
-        if not self.user_profile:
-            return items
-
-        downloads_dir = os.path.join(self.user_profile, 'Downloads')
-        if not os.path.exists(downloads_dir):
-            return items
-
-        # 常见的无用下载文件扩展名
-        useless_exts = {'.tmp', '.temp', '.part', '.crdownload', '.download'}
-        try:
-            for f in os.listdir(downloads_dir):
-                if self._stop_flag:
-                    break
-                ext = os.path.splitext(f)[1].lower()
-                if ext in useless_exts:
-                    try:
-                        fpath = os.path.join(downloads_dir, f)
-                        if os.path.isfile(fpath):
-                            size = os.path.getsize(fpath)
-                            if size > 0:
-                                items.append(CleanItem(
-                                    path=fpath,
-                                    size=size,
-                                    category='下载残留',
-                                    description=f'未完成的下载: {f}'
-                                ))
-                    except (OSError, PermissionError):
+                    # 跳过排除目录
+                    rel = os.path.relpath(dirpath, base_dir)
+                    parts = rel.split(os.sep)
+                    if parts and parts[0] in exclude_dirs:
+                        dirnames.clear()
                         continue
-        except (OSError, PermissionError):
-            pass
-        return items
 
-    def scan_dotnet_cache(self) -> List[CleanItem]:
-        """扫描 .NET 程序集缓存"""
-        items = []
-        if not self.user_profile:
-            return items
+                    # 跳过 node_modules, .git 等
+                    dirnames[:] = [d for d in dirnames
+                                   if not d.startswith('.')
+                                   and d not in ('node_modules', 'vendor', 'packages')]
 
-        dotnet_dirs = [
-            os.path.join(self.user_profile, 'AppData', 'Local', 'assembly'),
-            os.path.join(self.user_profile, 'AppData', 'Local', 'Microsoft', 'CLR_v4.0'),
-        ]
-
-        for d in dotnet_dirs:
-            if not os.path.exists(d):
-                continue
-            try:
-                total_size = 0
-                file_count = 0
-                for root, dirs, files in os.walk(d):
-                    if self._stop_flag:
-                        break
-                    for f in files:
+                    for f in filenames:
+                        if self._stop_flag:
+                            break
                         try:
-                            fpath = os.path.join(root, f)
-                            try:
-                                total_size += os.path.getsize(fpath)
-                                file_count += 1
-                            except (OSError, PermissionError):
-                                pass
-                        except (OSError, PermissionError):
-                            continue
-                if total_size > 0:
-                    items.append(CleanItem(
-                        path=d,
-                        size=total_size,
-                        category='.NET缓存',
-                        description=f'.NET 程序集缓存 ({file_count} 个文件, 共 {format_size(total_size)})'
-                    ))
-            except (OSError, PermissionError):
-                continue
-            if self._stop_flag:
-                break
-        return items
-
-    def scan_all(self, progress_callback=None) -> Dict[str, CleanCategory]:
-        """扫描所有垃圾文件"""
-        self.reset()
-        self.categories = {}
-
-        scan_funcs = [
-            ('Windows临时文件', self.scan_windows_temp),
-            ('用户临时文件', self.scan_user_temp),
-            ('浏览器缓存', self.scan_browser_cache),
-            ('预读取文件', self.scan_prefetch),
-            ('最近文档', self.scan_recent_documents),
-            ('下载残留', self.scan_downloads_folder),
-            ('回收站', self.scan_recycle_bin),
-            ('.NET缓存', self.scan_dotnet_cache),
-        ]
-
-        total_steps = len(scan_funcs)
-        for i, (cat_name, func) in enumerate(scan_funcs):
-            if self._stop_flag:
-                break
-            try:
-                items = func()
-                if items:
-                    cat = CleanCategory(name=cat_name, items=items)
-                    cat.total_size = sum(item.size for item in items)
-                    self.categories[cat_name] = cat
-                    self.total_size += cat.total_size
-            except Exception:
+                            fp = os.path.join(dirpath, f)
+                            if os.path.isfile(fp):
+                                size = os.path.getsize(fp)
+                                if size >= min_size:
+                                    cat.items.append(CleanItem(
+                                        path=fp, size=size,
+                                        category="大文件扫描",
+                                        description=f"大文件 ({format_size(size)})"
+                                    ))
+                                    cat.total_size += size
+                        except (PermissionError, OSError):
+                            pass
+            except (PermissionError, OSError):
                 pass
 
-            if progress_callback:
-                progress_callback(i + 1, total_steps, cat_name)
+        # 按大小排序
+        cat.items.sort(key=lambda x: x.size, reverse=True)
+        # 只保留前 200 个最大的
+        cat.items = cat.items[:200]
+        cat.total_size = sum(item.size for item in cat.items)
+        return cat
 
-        return self.categories
+    # ============================================================
+    # 模块 6: 重复文件检测
+    # ============================================================
+    def scan_duplicate_files(self) -> CleanCategory:
+        """扫描重复文件（按文件名+大小匹配）"""
+        cat = CleanCategory(name="重复文件")
+        scan_dirs = [
+            os.path.join(self.user_profile, 'Downloads'),
+            os.path.join(self.user_profile, 'Desktop'),
+            os.path.join(self.user_profile, 'Documents'),
+            os.path.join(self.user_profile, 'AppData', 'Local', 'Temp'),
+        ]
 
-    def delete_items(self, items: List[CleanItem], delete_callback=None) -> Tuple[int, int]:
-        """
-        删除指定的文件列表
-        返回: (成功数, 失败数)
-        """
+        file_map = defaultdict(list)  # (name, size) -> [paths]
+        scanned = 0
+
+        for base_dir in scan_dirs:
+            if self._stop_flag or not os.path.isdir(base_dir):
+                continue
+            try:
+                for dirpath, dirnames, filenames in os.walk(base_dir):
+                    if self._stop_flag:
+                        break
+                    scanned += 1
+                    if scanned % 1000 == 0:
+                        self._report_progress(scanned, 0, f"扫描重复文件: {dirpath}")
+
+                    # 跳过隐藏目录和缓存目录
+                    dirnames[:] = [d for d in dirnames
+                                   if not d.startswith('.')
+                                   and d not in ('node_modules', '.git', '__pycache__')]
+
+                    for f in filenames:
+                        if self._stop_flag:
+                            break
+                        try:
+                            fp = os.path.join(dirpath, f)
+                            if os.path.isfile(fp) and os.path.getsize(fp) > 1024:  # >1KB
+                                size = os.path.getsize(fp)
+                                key = (f.lower(), size)
+                                file_map[key].append(fp)
+                        except (PermissionError, OSError):
+                            pass
+            except (PermissionError, OSError):
+                pass
+
+        # 找出重复文件
+        for (name, size), paths in file_map.items():
+            if self._stop_flag:
+                break
+            if len(paths) >= 2:
+                # 保留第一个，其余标记为重复
+                for p in paths[1:]:
+                    cat.items.append(CleanItem(
+                        path=p, size=size,
+                        category="重复文件",
+                        description=f"重复文件: {name} ({format_size(size)})"
+                    ))
+                    cat.total_size += size
+
+        # 按大小排序
+        cat.items.sort(key=lambda x: x.size, reverse=True)
+        cat.items = cat.items[:300]  # 限制数量
+        cat.total_size = sum(item.size for item in cat.items)
+        return cat
+
+    # ============================================================
+    # 模块 7: 空文件夹清理
+    # ============================================================
+    def scan_empty_folders(self) -> CleanCategory:
+        """扫描空文件夹（限制深度为 3 层）"""
+        cat = CleanCategory(name="空文件夹")
+        scan_dirs = [
+            os.path.join(self.user_profile, 'AppData', 'Local'),
+            os.path.join(self.user_profile, 'AppData', 'Roaming'),
+            os.path.join(self.user_profile, 'Documents'),
+            os.path.join(self.user_profile, 'Downloads'),
+        ]
+
+        scanned = 0
+        for base_dir in scan_dirs:
+            if self._stop_flag or not os.path.isdir(base_dir):
+                continue
+            try:
+                base_depth = base_dir.rstrip(os.sep).count(os.sep)
+                for dirpath, dirnames, filenames in os.walk(base_dir, topdown=False):
+                    if self._stop_flag:
+                        break
+                    current_depth = dirpath.rstrip(os.sep).count(os.sep) - base_depth
+                    if current_depth > 3:
+                        continue
+                    scanned += 1
+                    if scanned % 2000 == 0:
+                        self._report_progress(scanned, 0, f"扫描空文件夹: {dirpath}")
+
+                    # 检查是否为空目录
+                    if not filenames and not dirnames:
+                        try:
+                            if len(os.listdir(dirpath)) == 0:
+                                cat.items.append(CleanItem(
+                                    path=dirpath, size=0,
+                                    category="空文件夹",
+                                    description=f"空文件夹 ({os.path.basename(dirpath)})"
+                                ))
+                        except (PermissionError, OSError):
+                            pass
+            except (PermissionError, OSError):
+                pass
+
+        return cat
+
+    # ============================================================
+    # 模块 8: Windows 更新缓存清理
+    # ============================================================
+    def scan_windows_update_cache(self) -> CleanCategory:
+        """扫描 Windows 更新缓存 (SoftwareDistribution)"""
+        cat = CleanCategory(name="Windows 更新缓存")
+        update_dir = os.path.join(self.drive, 'Windows', 'SoftwareDistribution', 'Download')
+        if os.path.isdir(update_dir):
+            size = self._get_dir_size(update_dir)
+            if size > 0:
+                cat.items.append(CleanItem(
+                    path=update_dir, size=size,
+                    category="Windows 更新缓存",
+                    description="Windows Update 下载缓存"
+                ))
+                cat.total_size = size
+        return cat
+
+    # ============================================================
+    # 模块 9: Prefetch 预读文件清理
+    # ============================================================
+    def scan_prefetch(self) -> CleanCategory:
+        """扫描 Prefetch 预读文件"""
+        cat = CleanCategory(name="预读文件 (Prefetch)")
+        prefetch_dir = os.path.join(self.drive, 'Windows', 'Prefetch')
+        if os.path.isdir(prefetch_dir):
+            files = self._safe_scan_dir(prefetch_dir, '*.pf')
+            for f in files:
+                size = self._safe_get_size(f)
+                if size > 0:
+                    cat.items.append(CleanItem(
+                        path=f, size=size,
+                        category="预读文件 (Prefetch)",
+                        description=f"预读文件 ({os.path.basename(f)})"
+                    ))
+                    cat.total_size += size
+        return cat
+
+    # ============================================================
+    # 模块 10: 字体缓存清理
+    # ============================================================
+    def scan_font_cache(self) -> CleanCategory:
+        """扫描字体缓存"""
+        cat = CleanCategory(name="字体缓存")
+        font_cache_paths = [
+            os.path.join(self.drive, 'Windows', 'ServiceProfiles', 'LocalService',
+                         'AppData', 'Local', 'FontCache'),
+            os.path.join(self.drive, 'Windows', 'System32', 'FNTCACHE.DAT'),
+        ]
+        for path in font_cache_paths:
+            if self._stop_flag:
+                break
+            if os.path.isdir(path):
+                size = self._get_dir_size(path)
+                if size > 0:
+                    cat.items.append(CleanItem(
+                        path=path, size=size,
+                        category="字体缓存",
+                        description=f"字体缓存 ({os.path.basename(path)})"
+                    ))
+                    cat.total_size += size
+            elif os.path.isfile(path):
+                size = self._safe_get_size(path)
+                if size > 0:
+                    cat.items.append(CleanItem(
+                        path=path, size=size,
+                        category="字体缓存",
+                        description="字体缓存文件 (FNTCACHE.DAT)"
+                    ))
+                    cat.total_size += size
+        return cat
+
+    # ============================================================
+    # 模块 11: 缩略图缓存清理
+    # ============================================================
+    def scan_thumbnail_cache(self) -> CleanCategory:
+        """扫描缩略图缓存"""
+        cat = CleanCategory(name="缩略图缓存")
+        thumb_path = os.path.join(
+            self.user_profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'Explorer'
+        )
+        if os.path.isdir(thumb_path):
+            patterns = ['thumbcache_*.db', 'thumbcache_*.db_*', 'iconcache_*.db']
+            for pattern in patterns:
+                if self._stop_flag:
+                    break
+                files = self._safe_scan_dir(thumb_path, pattern)
+                for f in files:
+                    size = self._safe_get_size(f)
+                    if size > 0:
+                        cat.items.append(CleanItem(
+                            path=f, size=size,
+                            category="缩略图缓存",
+                            description=f"缩略图缓存 ({os.path.basename(f)})"
+                        ))
+                        cat.total_size += size
+        return cat
+
+    # ============================================================
+    # 模块 12: DNS 缓存清理 (通过命令)
+    # ============================================================
+    def scan_dns_cache(self) -> CleanCategory:
+        """DNS 缓存（通过 ipconfig /flushdns 清理）"""
+        cat = CleanCategory(name="DNS 缓存")
+        # DNS 缓存大小无法直接获取，标记为可清理项
+        cat.items.append(CleanItem(
+            path="dns_cache", size=0,
+            category="DNS 缓存",
+            description="DNS 解析缓存 (ipconfig /flushdns)"
+        ))
+        return cat
+
+    # ============================================================
+    # 模块 13: 剪贴板历史清理
+    # ============================================================
+    def scan_clipboard_history(self) -> CleanCategory:
+        """扫描剪贴板历史"""
+        cat = CleanCategory(name="剪贴板历史")
+        clipboard_path = os.path.join(
+            self.user_profile, 'AppData', 'Local', 'Microsoft', 'Windows',
+            'Clipboard'
+        )
+        if os.path.isdir(clipboard_path):
+            size = self._get_dir_size(clipboard_path)
+            if size > 0:
+                cat.items.append(CleanItem(
+                    path=clipboard_path, size=size,
+                    category="剪贴板历史",
+                    description="剪贴板历史记录"
+                ))
+                cat.total_size = size
+        return cat
+
+    # ============================================================
+    # 模块 14: 软件卸载残留扫描
+    # ============================================================
+    def scan_software_leftovers(self) -> CleanCategory:
+        """扫描软件卸载残留（限制深度为 3 层）"""
+        cat = CleanCategory(name="软件卸载残留")
+        scan_dirs = [
+            os.path.join(self.user_profile, 'AppData', 'Local'),
+            os.path.join(self.user_profile, 'AppData', 'Roaming'),
+        ]
+
+        # 常见的已卸载软件残留文件夹特征
+        leftover_names = {
+            'Uninstall', 'uninstall', 'UNINSTALL',
+            'CrashReports', 'crashreports',
+            'Update', 'update', 'Updater', 'updater',
+            'Logs', 'logs', 'LOG',
+            'Backup', 'backup', 'BACKUP',
+        }
+
+        scanned = 0
+        for base_dir in scan_dirs:
+            if self._stop_flag or not os.path.isdir(base_dir):
+                continue
+            try:
+                base_depth = base_dir.rstrip(os.sep).count(os.sep)
+                for dirpath, dirnames, filenames in os.walk(base_dir, topdown=False):
+                    if self._stop_flag:
+                        break
+                    current_depth = dirpath.rstrip(os.sep).count(os.sep) - base_depth
+                    if current_depth > 3:
+                        continue
+                    scanned += 1
+                    if scanned % 3000 == 0:
+                        self._report_progress(scanned, 0, f"扫描残留: {dirpath}")
+
+                    # 检查文件夹名是否匹配残留特征
+                    dir_name = os.path.basename(dirpath)
+                    if dir_name in leftover_names:
+                        try:
+                            size = self._get_dir_size_fast(dirpath, 1)
+                            if 0 < size < 50 * 1024 * 1024:  # <50MB 的残留
+                                cat.items.append(CleanItem(
+                                    path=dirpath, size=size,
+                                    category="软件卸载残留",
+                                    description=f"可能残留: {dir_name} ({format_size(size)})"
+                                ))
+                                cat.total_size += size
+                        except (PermissionError, OSError):
+                            pass
+            except (PermissionError, OSError):
+                pass
+
+        return cat
+
+    # ============================================================
+    # 模块 15: 无效快捷方式检测
+    # ============================================================
+    def scan_invalid_shortcuts(self) -> CleanCategory:
+        """检测无效的快捷方式 (.lnk 指向不存在的目标)"""
+        cat = CleanCategory(name="无效快捷方式")
+        import win32com.client  # 可选依赖
+
+        scan_dirs = [
+            os.path.join(self.user_profile, 'Desktop'),
+            os.path.join(self.user_profile, 'AppData', 'Roaming',
+                         'Microsoft', 'Windows', 'Start Menu'),
+            os.path.join(self.drive, 'ProgramData',
+                         'Microsoft', 'Windows', 'Start Menu'),
+        ]
+
+        scanned = 0
+        for base_dir in scan_dirs:
+            if self._stop_flag or not os.path.isdir(base_dir):
+                continue
+            try:
+                for dirpath, dirnames, filenames in os.walk(base_dir):
+                    if self._stop_flag:
+                        break
+                    scanned += 1
+                    if scanned % 500 == 0:
+                        self._report_progress(scanned, 0, f"扫描快捷方式: {dirpath}")
+
+                    for f in filenames:
+                        if self._stop_flag:
+                            break
+                        if f.lower().endswith('.lnk'):
+                            fp = os.path.join(dirpath, f)
+                            try:
+                                # 简单检测：检查文件大小是否为 0
+                                size = os.path.getsize(fp)
+                                if size == 0:
+                                    cat.items.append(CleanItem(
+                                        path=fp, size=0,
+                                        category="无效快捷方式",
+                                        description=f"无效快捷方式 ({f})"
+                                    ))
+                                else:
+                                    # 尝试用 shell 方式检测
+                                    result = subprocess.run(
+                                        ['powershell', '-Command',
+                                         f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{fp}');"
+                                         f"if(!(Test-Path $s.TargetPath)){{'INVALID'}}else{{'OK'}}"],
+                                        capture_output=True, text=True, timeout=5
+                                    )
+                                    if 'INVALID' in result.stdout:
+                                        cat.items.append(CleanItem(
+                                            path=fp, size=size,
+                                            category="无效快捷方式",
+                                            description=f"目标不存在: {f}"
+                                        ))
+                            except (PermissionError, OSError, subprocess.TimeoutExpired):
+                                pass
+            except (PermissionError, OSError):
+                pass
+
+        return cat
+
+    # ============================================================
+    # 模块 16: 磁盘空间分析
+    # ============================================================
+    def _get_dir_size_fast(self, directory: str, max_depth: int = 2) -> int:
+        """快速获取目录大小（限制深度）"""
+        total = 0
+        try:
+            base_depth = directory.rstrip(os.sep).count(os.sep)
+            for dirpath, dirnames, filenames in os.walk(directory):
+                if self._stop_flag:
+                    break
+                current_depth = dirpath.rstrip(os.sep).count(os.sep) - base_depth
+                if current_depth > max_depth:
+                    dirnames.clear()
+                    continue
+                for f in filenames:
+                    try:
+                        fp = os.path.join(dirpath, f)
+                        if os.path.isfile(fp):
+                            total += os.path.getsize(fp)
+                    except (PermissionError, OSError):
+                        pass
+        except (PermissionError, OSError):
+            pass
+        return total
+
+    def scan_disk_analysis(self) -> CleanCategory:
+        """磁盘空间分析 - 统计各目录占用（快速模式，限制深度）"""
+        cat = CleanCategory(name="磁盘空间分析")
+        scan_targets = [
+            ("用户目录", self.user_profile, 1),
+            ("ProgramData", os.path.join(self.drive, 'ProgramData'), 1),
+            ("Windows", os.path.join(self.drive, 'Windows'), 1),
+        ]
+
+        for label, dir_path, depth in scan_targets:
+            if self._stop_flag or not os.path.isdir(dir_path):
+                continue
+            size = self._get_dir_size_fast(dir_path, depth)
+            if size > 0:
+                cat.items.append(CleanItem(
+                    path=dir_path, size=size,
+                    category="磁盘空间分析",
+                    description=f"{label}: {format_size(size)}"
+                ))
+                cat.total_size += size
+
+        # 用户目录下的大子目录（只扫1层）
+        user_subdirs = [
+            'Desktop', 'Documents', 'Downloads', 'Pictures',
+            'Music', 'Videos',
+        ]
+        for sub in user_subdirs:
+            if self._stop_flag:
+                break
+            sub_path = os.path.join(self.user_profile, sub)
+            if os.path.isdir(sub_path):
+                size = self._get_dir_size_fast(sub_path, 1)
+                if size > 0:
+                    cat.items.append(CleanItem(
+                        path=sub_path, size=size,
+                        category="磁盘空间分析",
+                        description=f"  ├ {sub}: {format_size(size)}"
+                    ))
+
+        cat.items.sort(key=lambda x: x.size, reverse=True)
+        return cat
+
+    # ============================================================
+    # 清理执行
+    # ============================================================
+    def clean_items(self, items: List[CleanItem], callback=None) -> Tuple[int, int]:
+        """执行清理，返回 (成功数, 失败数)"""
         success = 0
         failed = 0
         total = len(items)
@@ -442,60 +834,76 @@ class WindowsCleaner:
         for i, item in enumerate(items):
             if self._stop_flag:
                 break
+
+            if callback:
+                callback(i + 1, total, f"清理: {os.path.basename(item.path)}")
+
             try:
                 path = item.path
-                if not os.path.exists(path):
+
+                # 特殊处理：DNS 缓存
+                if path == "dns_cache":
+                    subprocess.run(['ipconfig', '/flushdns'],
+                                   capture_output=True, timeout=10)
                     success += 1
                     continue
 
                 if os.path.isfile(path):
-                    os.chmod(path, 0o777)  # 尝试解除权限限制
                     os.remove(path)
                     success += 1
                 elif os.path.isdir(path):
                     shutil.rmtree(path, ignore_errors=True)
+                    # 验证是否删除成功
                     if not os.path.exists(path):
                         success += 1
                     else:
                         failed += 1
                 else:
                     failed += 1
-            except (OSError, PermissionError):
-                failed += 1
             except Exception:
                 failed += 1
 
-            if delete_callback:
-                delete_callback(i + 1, total, item.description)
-
         return success, failed
 
-    def delete_category(self, category_name: str, delete_callback=None) -> Tuple[int, int]:
-        """删除指定分类的所有文件"""
-        if category_name not in self.categories:
-            return 0, 0
-        return self.delete_items(self.categories[category_name].items, delete_callback)
+    # ============================================================
+    # 全量扫描
+    # ============================================================
+    def scan_all(self, progress_callback=None) -> Dict[str, CleanCategory]:
+        """执行全量扫描"""
+        self.reset()
+        if progress_callback:
+            self.set_progress_callback(progress_callback)
 
-    def delete_all(self, delete_callback=None) -> Dict[str, Tuple[int, int]]:
-        """删除所有已扫描的垃圾文件"""
-        results = {}
-        for cat_name in list(self.categories.keys()):
+        scan_modules = [
+            ("Windows 临时文件", self.scan_windows_temp),
+            ("回收站", self.scan_recycle_bin),
+            ("浏览器缓存", self.scan_browser_cache),
+            ("系统日志", self.scan_system_logs),
+            ("Windows 更新缓存", self.scan_windows_update_cache),
+            ("预读文件 (Prefetch)", self.scan_prefetch),
+            ("字体缓存", self.scan_font_cache),
+            ("缩略图缓存", self.scan_thumbnail_cache),
+            ("剪贴板历史", self.scan_clipboard_history),
+            ("DNS 缓存", self.scan_dns_cache),
+            ("空文件夹", self.scan_empty_folders),
+            ("软件卸载残留", self.scan_software_leftovers),
+            ("大文件扫描", lambda: self.scan_large_files(100)),
+            ("重复文件", self.scan_duplicate_files),
+            ("无效快捷方式", self.scan_invalid_shortcuts),
+            ("磁盘空间分析", self.scan_disk_analysis),
+        ]
+
+        total_modules = len(scan_modules)
+        for idx, (name, scan_func) in enumerate(scan_modules):
             if self._stop_flag:
                 break
-            success, failed = self.delete_category(cat_name, delete_callback)
-            results[cat_name] = (success, failed)
-        return results
+            self._report_progress(idx, total_modules, f"正在扫描: {name}")
+            try:
+                cat = scan_func()
+                if cat.items:
+                    self.categories[name] = cat
+            except Exception as e:
+                print(f"扫描 {name} 失败: {e}")
 
-
-if __name__ == '__main__':
-    # 测试模式
-    cleaner = WindowsCleaner()
-    print(f"系统盘: {cleaner.drive}")
-    print(f"用户目录: {cleaner.user_profile}")
-    print(f"管理员权限: {is_admin()}")
-    print("\n开始扫描...")
-    categories = cleaner.scan_all()
-    print(f"\n扫描完成! 共发现 {len(categories)} 类垃圾文件")
-    for cat_name, cat in categories.items():
-        print(f"  {cat_name}: {format_size(cat.total_size)} ({len(cat.items)} 个文件)")
-    print(f"\n总计可清理: {format_size(cleaner.total_size)}")
+        self._report_progress(total_modules, total_modules, "扫描完成")
+        return self.categories
