@@ -258,7 +258,6 @@ class CleanerGUI:
 
         self.progress_bar = ttk.Progressbar(
             progress_frame, mode='determinate',
-            style='Progressbar.Horizontal',
             length=200
         )
         self.progress_bar.pack(fill=tk.X, expand=True)
