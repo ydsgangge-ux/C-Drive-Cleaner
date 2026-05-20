@@ -1,10 +1,65 @@
-*.pyc
-.env
-.idea/
-.venv/
-.vscode/
+# Python 缓存和编译文件
 __pycache__/
-build/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.egg
 dist/
-node_modules/
+build/
+
+# 虚拟环境
+.venv/
 venv/
+env/
+.env/
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 日志文件
+*.log
+gangge_debug*.log
+
+# 缓存目录
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# 数据库文件
+*.db
+*.db-shm
+*.db-wal
+
+# 项目生成的数据目录
+gangge_projects/
+gangge_data/
+
+# AI 辅助工具内部文件
+.gangge/
+.gangge_data/
+
+# 图片/截图等大文件
+docs/screenshots/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+
+# 操作系统特定
+*.bat
+*.ps1
+*.cmd
