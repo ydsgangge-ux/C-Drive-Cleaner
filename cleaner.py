@@ -18,6 +18,131 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 
+# ============================================================
+# 风险分级规则
+# ------------------------------------------------------------
+# safe    : 临时文件 / 缓存 / 回收站 / 日志 / 预读 / 缩略图等，
+#           删除后不影响系统与用户数据。
+# caution : 可能包含用户数据或影响个别程序的项，例如空文件夹、
+#           软件卸载残留、剪贴板历史、无效快捷方式、ProgramData
+#           下的大文件、非临时目录的重复文件。
+# danger  : 用户文档 / 桌面 / 下载 / 图片 / 视频 / 音乐等个人
+#           目录中的文件，以及只读的磁盘占用分析结果，禁止删除。
+#
+# 判断顺序：分类白名单 -> 只读分类 -> 用户文件分类结合路径 ->
+#           特殊分类 -> 路径兜底。所有扫描结果都会经过该规则，
+#           保证每个 CleanItem 都带 risk_level。
+# ============================================================
+RISK_SAFE = "safe"
+RISK_CAUTION = "caution"
+RISK_DANGER = "danger"
+RISK_ORDER = (RISK_SAFE, RISK_CAUTION, RISK_DANGER)
+
+RISK_LABELS = {
+    RISK_SAFE: "可放心删除",
+    RISK_CAUTION: "谨慎删除",
+    RISK_DANGER: "不建议删除",
+}
+
+RISK_DESCRIPTIONS = {
+    RISK_SAFE: "临时文件、缓存、回收站、日志等，删除后不影响正常使用",
+    RISK_CAUTION: "可能包含用户数据或影响个别程序，请确认后再删除",
+    RISK_DANGER: "用户文档、下载或系统关键数据，禁止直接删除",
+}
+
+# 分类本身即可判定为安全
+_SAFE_CATEGORIES = frozenset({
+    "Windows 临时文件",
+    "回收站",
+    "浏览器缓存",
+    "系统日志",
+    "Windows 更新缓存",
+    "预读文件 (Prefetch)",
+    "字体缓存",
+    "缩略图缓存",
+    "DNS 缓存",
+})
+
+# 只读分析结果，永远不可删除
+_DANGER_CATEGORIES = frozenset({"磁盘空间分析"})
+
+# 可能包含用户文件的分类，需要结合路径进一步判断
+_USER_FILE_CATEGORIES = frozenset({"大文件扫描", "重复文件"})
+
+# 用户个人数据目录（Windows 中英文常见名称）
+_USER_DATA_DIRS = frozenset({
+    "documents", "desktop", "downloads", "pictures", "videos", "music",
+    "onedrive", "favorites", "contacts", "links", "saved games",
+    "我的文档", "桌面", "下载", "图片", "视频", "音乐", "收藏夹",
+})
+
+# 临时 / 缓存路径特征（小写、统一反斜杠）
+# 采用“目录名精确匹配 + 少量特殊路径”，避免 temperature 之类
+# 近似名称被误判为临时目录
+_SAFE_DIR_SEGMENTS = frozenset({
+    "temp", "tmp", "cache", "caches", "cache2",
+    "inetcache", "prefetch", "fontcache", "thumbcache", "iconcache",
+    "$recycle.bin",
+})
+_SAFE_PATH_PATTERNS = (
+    "\\softwaredistribution\\download",
+)
+
+
+def _normalized_path(path: str) -> str:
+    """统一路径分隔符并转小写，便于规则匹配"""
+    return (path or "").replace("/", "\\").lower()
+
+
+def _path_is_temp(path_lower: str) -> bool:
+    """路径是否位于临时/缓存等安全位置"""
+    segments = [seg for seg in path_lower.split("\\") if seg]
+    if any(seg in _SAFE_DIR_SEGMENTS for seg in segments):
+        return True
+    return any(pattern in path_lower for pattern in _SAFE_PATH_PATTERNS)
+
+
+def _path_in_user_data(path_lower: str) -> bool:
+    """路径是否位于用户个人数据目录"""
+    parts = [seg for seg in path_lower.split("\\") if seg]
+    return any(seg in _USER_DATA_DIRS for seg in parts)
+
+
+def classify_risk(category: str, path: str) -> str:
+    """按类别 + 路径判断清理项风险等级"""
+    cat = (category or "").strip()
+    p = _normalized_path(path)
+
+    if cat in _DANGER_CATEGORIES:
+        return RISK_DANGER
+
+    is_temp = _path_is_temp(p)
+    in_user_data = _path_in_user_data(p) and not is_temp
+
+    if cat in _SAFE_CATEGORIES:
+        # 正常缓存/临时位置直接放行；异常落在用户目录时降级
+        if in_user_data:
+            return RISK_CAUTION
+        return RISK_SAFE
+
+    if cat in _USER_FILE_CATEGORIES:
+        if is_temp:
+            return RISK_SAFE
+        if in_user_data:
+            return RISK_DANGER
+        return RISK_CAUTION
+
+    if cat in ("空文件夹", "软件卸载残留", "剪贴板历史", "无效快捷方式"):
+        # 可能影响程序结构或包含用户内容，需用户手动确认
+        return RISK_CAUTION
+
+    if is_temp:
+        return RISK_SAFE
+    if in_user_data:
+        return RISK_DANGER
+    return RISK_CAUTION
+
+
 @dataclass
 class CleanItem:
     """单个清理项"""
@@ -25,6 +150,12 @@ class CleanItem:
     size: int  # 字节
     category: str  # 分类
     description: str  # 描述
+    risk_level: str = ""  # safe / caution / danger
+
+    def __post_init__(self):
+        # 未显式指定或值非法时，按类别 + 路径自动分级
+        if self.risk_level not in RISK_ORDER:
+            self.risk_level = classify_risk(self.category, self.path)
 
 
 @dataclass
@@ -33,6 +164,57 @@ class CleanCategory:
     name: str
     items: List[CleanItem] = field(default_factory=list)
     total_size: int = 0
+
+    def items_by_risk(self) -> Dict[str, List[CleanItem]]:
+        """按风险等级拆分当前分类的条目"""
+        groups: Dict[str, List[CleanItem]] = {risk: [] for risk in RISK_ORDER}
+        for item in self.items:
+            groups.setdefault(item.risk_level, []).append(item)
+        return groups
+
+    def risk_counts(self) -> Dict[str, int]:
+        """统计各风险等级的条目数量"""
+        counts: Dict[str, int] = {risk: 0 for risk in RISK_ORDER}
+        for item in self.items:
+            counts[item.risk_level] = counts.get(item.risk_level, 0) + 1
+        return counts
+
+
+def group_items_by_risk(categories: Dict[str, CleanCategory]) -> Dict[str, Dict[str, List[CleanItem]]]:
+    """将扫描结果按风险等级分组：{risk: {分类名: [条目]}}"""
+    groups: Dict[str, Dict[str, List[CleanItem]]] = {risk: {} for risk in RISK_ORDER}
+    for cat_name, category in categories.items():
+        for item in category.items:
+            bucket = groups.setdefault(item.risk_level, {})
+            bucket.setdefault(cat_name, []).append(item)
+    return groups
+
+
+def summarize_risk(items: List[CleanItem]) -> Dict[str, Dict[str, int]]:
+    """汇总条目：{risk: {"count": n, "size": bytes}}"""
+    summary: Dict[str, Dict[str, int]] = {
+        risk: {"count": 0, "size": 0} for risk in RISK_ORDER
+    }
+    for item in items:
+        entry = summary.setdefault(item.risk_level, {"count": 0, "size": 0})
+        entry["count"] += 1
+        entry["size"] += item.size
+    return summary
+
+
+def format_delete_summary(items: List[CleanItem]) -> str:
+    """生成删除前汇总文案，例如：
+    将删除 12 项（可放心删除）、3 项（谨慎删除）
+    """
+    summary = summarize_risk(items)
+    safe_count = summary[RISK_SAFE]["count"]
+    caution_count = summary[RISK_CAUTION]["count"]
+    danger_count = summary[RISK_DANGER]["count"]
+    text = (f"将删除 {safe_count} 项（可放心删除）、"
+            f"{caution_count} 项（谨慎删除）")
+    if danger_count:
+        text += f"，另有 {danger_count} 项（不建议删除，已跳过）"
+    return text
 
 
 def get_windows_drive() -> str:
@@ -825,11 +1007,14 @@ class WindowsCleaner:
     # ============================================================
     # 清理执行
     # ============================================================
-    def clean_items(self, items: List[CleanItem], callback=None) -> Tuple[int, int]:
+    def clean_items(self, items: List[CleanItem], callback=None,
+                    allow_danger: bool = False) -> Tuple[int, int]:
         """执行清理，返回 (成功数, 失败数)
-        
-        注意：以下分类的条目会被跳过（只读分析，不可删除）：
-        - 磁盘空间分析
+
+        安全约束：
+        - danger 项默认拒绝删除，只有显式 allow_danger=True 才放行；
+        - 磁盘空间分析等只读分类永远跳过；
+        - caution 项允许在用户手动勾选并确认后删除。
         """
         success = 0
         failed = 0
@@ -845,6 +1030,13 @@ class WindowsCleaner:
             if callback:
                 callback(i + 1, total, f"清理: {os.path.basename(item.path)}")
 
+            risk = getattr(item, 'risk_level', classify_risk(item.category, item.path))
+
+            # danger 项：默认拦截，需调用方二次确认后显式放行
+            if risk == RISK_DANGER and not allow_danger:
+                failed += 1
+                continue
+
             # 跳过只读分类（磁盘空间分析等只显示不删除）
             if item.category in readonly_categories:
                 failed += 1
@@ -859,20 +1051,6 @@ class WindowsCleaner:
                                    capture_output=True, timeout=10)
                     success += 1
                     continue
-
-                # 大文件扫描额外安全确认（只删除用户目录下的明确临时/缓存文件）
-                if item.category == "大文件扫描":
-                    # 只删除位于临时目录或缓存目录的大文件
-                    temp_dirs = [
-                        tempfile.gettempdir().lower(),
-                        os.path.join(self.user_profile, 'AppData', 'Local', 'Temp').lower(),
-                        os.path.join(self.user_profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'INetCache').lower(),
-                    ]
-                    path_lower = path.lower()
-                    is_safe = any(path_lower.startswith(td) for td in temp_dirs)
-                    if not is_safe:
-                        failed += 1
-                        continue
 
                 if os.path.isfile(path):
                     os.remove(path)
