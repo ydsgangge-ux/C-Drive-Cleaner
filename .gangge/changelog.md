@@ -46,3 +46,21 @@
 
 ## 2026-11-17 11:14 (第14轮自动记录)
 - 已完成: `test_cleanup.py`
+
+## 2026-11-17 11:20 (第18轮)
+- GitHub SSH 推送任务完成：
+  - 生成 ED25519 密钥对，公钥已添加到 GitHub 账号 ydsgangge-ux
+  - 远程 origin 从 HTTPS 切换为 `git@github.com:ydsgangge-ux/C-Drive-Cleaner.git`
+  - `git push origin master` 成功，`git ls-remote` 验证远程与本地一致（ad5653f）
+- README.md 更新并推送：
+  - 新增「🛡️ 风险分级保护」功能章节
+  - 克隆地址改为 SSH 方式
+  - 项目结构补充 test_cleanup.py
+  - 使用说明中勾选逻辑改为「安全默认勾选，危险需手动勾选」
+- 测试验证: `pytest test_cleanup.py` 9 个用例全部通过
+
+## 2026-11-17 11:29 (第14轮自动记录)
+- 已完成: `.gangge/progress.md`
+
+## 2026-11-17 11:30 (第17轮自动记录)
+- 已完成: `.gangge/progress.md`
