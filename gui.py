@@ -5,6 +5,7 @@ danger 禁用并拦截，删除前按风险汇总确认。
 """
 
 import os
+import subprocess
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -79,6 +80,9 @@ class CleanerGUI:
         self.group_vars: Dict[str, tk.BooleanVar] = {}
         self.risk_chip_labels: Dict[str, tk.Label] = {}
         self.selected_bucket: Optional[str] = None
+        self.tree_item_map: Dict[str, CleanItem] = {}
+        self.bucket_card_labels: Dict[str, Tuple[tk.Label, tk.Label]] = {}
+        self._ctx_item: Optional[CleanItem] = None
 
         self.is_scanning = False
         self.is_cleaning = False
@@ -413,6 +417,16 @@ class CleanerGUI:
         tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self._bind_mousewheel(self.tree, self.tree)
 
+        # 右键菜单：资源管理器定位 / 删除单条
+        self.ctx_menu = tk.Menu(self.root, tearoff=False, font=(self.FONT_FAMILY, 9))
+        self.ctx_menu.add_command(
+            label="📁 在资源管理器中显示", command=self._ctx_reveal_in_explorer
+        )
+        self.ctx_menu.add_command(
+            label="🗑 删除此项...", command=self._ctx_delete_single
+        )
+        self.tree.bind('<Button-3>', self._on_tree_context_menu)
+
     def _build_footer(self, parent):
         footer = tk.Frame(
             parent, bg=self.COLORS['card_bg'],
@@ -474,6 +488,8 @@ class CleanerGUI:
         self.selected_bucket = None
         self.categories = {}
         self.tree.delete(*self.tree.get_children())
+        self.tree_item_map = {}
+        self.bucket_card_labels = {}
         self.clean_btn.config(state=tk.DISABLED, text="🗑 清理选中项")
         self.reset_btn.config(state=tk.DISABLED)
         self.detail_count_label.config(text="")
@@ -687,6 +703,8 @@ class CleanerGUI:
         )
         count_label.pack(side=tk.RIGHT, padx=(0, 8))
 
+        self.bucket_card_labels[key] = (count_label, size_label)
+
         name_label = tk.Label(
             row, text=cat_name,
             font=(self.FONT_FAMILY, 9),
@@ -755,8 +773,9 @@ class CleanerGUI:
 
     def _fill_tree(self, items: List[CleanItem], scope: str):
         self.tree.delete(*self.tree.get_children())
+        self.tree_item_map = {}
         for item in items:
-            self.tree.insert(
+            iid = self.tree.insert(
                 '', tk.END,
                 values=(
                     RISK_LABELS.get(item.risk_level, item.risk_level),
@@ -766,11 +785,197 @@ class CleanerGUI:
                 ),
                 tags=(item.risk_level,)
             )
+            self.tree_item_map[iid] = item
         total_size = sum(item.size for item in items)
         self.detail_count_label.config(
             text=f"{len(items)} 项 · {format_size(total_size)}"
         )
         self.detail_scope_label.config(text=scope)
+
+    # ============================================================
+    # 右键：资源管理器定位 / 删除单条
+    # ============================================================
+    @staticmethod
+    def _item_identity(path: str) -> str:
+        """条目路径归一化（dns_cache 等伪路径按原样处理）"""
+        if path == 'dns_cache':
+            return path
+        return os.path.normcase(os.path.abspath(path))
+
+    def _on_tree_context_menu(self, event):
+        """右键列表行：选中该行并弹出菜单"""
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return
+        self.tree.selection_set(row)
+        item = self.tree_item_map.get(row)
+        if item is None:
+            return
+        self._ctx_item = item
+
+        # 非真实路径（如 dns_cache）无法在资源管理器定位
+        revealable = os.path.isabs(item.path)
+        # 扫描/清理中、不建议删除项、只读分类禁止单条删除
+        deletable = (
+            not self.is_scanning
+            and not self.is_cleaning
+            and item.risk_level != RISK_DANGER
+            and item.category != "磁盘空间分析"
+        )
+        self.ctx_menu.entryconfig(0, state=tk.NORMAL if revealable else tk.DISABLED)
+        self.ctx_menu.entryconfig(1, state=tk.NORMAL if deletable else tk.DISABLED)
+        try:
+            self.ctx_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.ctx_menu.grab_release()
+
+    def _ctx_reveal_in_explorer(self):
+        """在资源管理器中定位并选中该文件/文件夹"""
+        item = self._ctx_item
+        self._ctx_item = None
+        if item is None or not os.path.isabs(item.path):
+            return
+        try:
+            path = os.path.normpath(item.path)
+            target = path if os.path.exists(path) else os.path.dirname(path)
+            subprocess.Popen(f'explorer /select,"{target}"')
+        except Exception as e:
+            messagebox.showerror("打开失败", f"无法在资源管理器中显示：\n{e}")
+
+    def _ctx_delete_single(self):
+        """删除列表中的单个条目（删除前二次确认）"""
+        item = self._ctx_item
+        self._ctx_item = None
+        if item is None:
+            return
+        if self.is_scanning or self.is_cleaning:
+            messagebox.showinfo("提示", "正在扫描或清理，请稍候再试")
+            return
+        if item.risk_level == RISK_DANGER:
+            messagebox.showwarning("已拦截", "「不建议删除」项禁止删除")
+            return
+        if item.category == "磁盘空间分析":
+            messagebox.showinfo("提示", "磁盘空间分析为只读分类，不可删除")
+            return
+        if not self._confirm_delete([item], summarize_risk([item])):
+            return
+
+        self.is_cleaning = True
+        self.scan_btn.config(state=tk.DISABLED)
+        self.reset_btn.config(state=tk.DISABLED)
+        name = (
+            os.path.basename(item.path.rstrip('\\/'))
+            if os.path.isabs(item.path) else item.path
+        )
+        self.status_var.set(f"正在删除: {name}")
+        self.bottom_status.config(text=f"⏳ 正在删除: {item.path}")
+        self.progress_bar['value'] = 0
+
+        def worker():
+            try:
+                # 避免上一次“停止扫描”残留的停止标志中断本次删除
+                self.cleaner._stop_flag = False
+                success, failed = self.cleaner.clean_items(
+                    [item],
+                    callback=lambda c, t, m: self.root.after(
+                        0, self._update_progress, c, t, m
+                    ),
+                    allow_danger=False,
+                )
+                self.root.after(
+                    0, lambda: self._on_single_delete_done(item, success, failed)
+                )
+            except Exception as e:
+                msg = str(e)
+                self.root.after(
+                    0, lambda msg=msg: self._on_single_delete_error(msg)
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_single_delete_done(self, item: CleanItem, success: int, failed: int):
+        """单条删除完成回调"""
+        self.is_cleaning = False
+        self.scan_btn.config(state=tk.NORMAL)
+        self.reset_btn.config(state=tk.NORMAL)
+        self.progress_bar['value'] = 100
+
+        if success:
+            self._remove_item_everywhere(item)
+            self.stats_label.config(
+                text=f"上次清理: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            self.status_var.set("已删除 1 项")
+            self.bottom_status.config(text=f"✅ 已删除: {item.path}")
+        else:
+            self.status_var.set("删除失败")
+            self.bottom_status.config(text=f"❌ 删除失败: {item.path}")
+            messagebox.showwarning(
+                "删除失败",
+                f"无法删除：\n{item.path}\n\n"
+                "文件可能正在被占用或权限不足。"
+            )
+        self._update_selection_summary()
+
+    def _on_single_delete_error(self, error: str):
+        """单条删除出错回调"""
+        self.is_cleaning = False
+        self.scan_btn.config(state=tk.NORMAL)
+        self.reset_btn.config(state=tk.NORMAL)
+        self.progress_bar.stop()
+        self.status_var.set(f"删除出错: {error}")
+        self.bottom_status.config(text=f"❌ 删除出错: {error}")
+
+    def _remove_item_everywhere(self, item: CleanItem):
+        """单条删除成功后：从详情列表、分类数据、卡片统计中移除"""
+        def same(it: CleanItem) -> bool:
+            return self._item_identity(it.path) == self._item_identity(item.path)
+
+        # 1. 详情列表行
+        for iid, it in list(self.tree_item_map.items()):
+            if same(it):
+                if self.tree.exists(iid):
+                    self.tree.delete(iid)
+                del self.tree_item_map[iid]
+
+        # 2. 分类原始数据（与 cleaner.categories 共享对象）
+        for cat in self.categories.values():
+            cat.items[:] = [it for it in cat.items if not same(it)]
+
+        # 3. 分类卡片数据与卡片上的计数/大小
+        for key in list(self.bucket_items.keys()):
+            self.bucket_items[key] = [
+                it for it in self.bucket_items[key] if not same(it)
+            ]
+            labels = self.bucket_card_labels.get(key)
+            if labels is None:
+                continue
+            count_label, size_label = labels
+            remaining = self.bucket_items[key]
+            if remaining:
+                count_label.config(text=f"{len(remaining)} 项")
+                size_label.config(
+                    text=format_size(sum(i.size for i in remaining))
+                )
+            else:
+                frame = self.bucket_frames.get(key)
+                if frame is not None:
+                    frame.pack_forget()
+                self.bucket_vars[key].set(False)
+
+        # 4. 详情计数、风险条、分组勾选状态
+        remaining_in_view = list(self.tree_item_map.values())
+        self.detail_count_label.config(
+            text=(
+                f"{len(remaining_in_view)} 项 · "
+                f"{format_size(sum(i.size for i in remaining_in_view))}"
+            )
+        )
+        all_items = [
+            it for cat in self.categories.values() for it in cat.items
+        ]
+        self._update_risk_chips(summarize_risk(all_items))
+        self._sync_group_vars()
 
     # ============================================================
     # 选择与清理
